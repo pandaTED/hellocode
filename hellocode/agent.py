@@ -6,9 +6,8 @@ import asyncio
 import json
 import logging
 import time
-import traceback
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 logger = logging.getLogger("hellocode.agent")
 
@@ -48,6 +47,7 @@ class AgentLoop:
         agent_name: str = "build",
         workdir: Path | None = None,
         on_tool_call: Any = None,
+        on_tool_result: Any = None,
         on_message: Any = None,
     ) -> str:
         agent_def = DEFAULT_AGENTS.get(agent_name) or AgentDef(name=agent_name, description="", mode="primary")
@@ -82,6 +82,10 @@ class AgentLoop:
                 content = data.get("content") or ""
                 tool_calls = data.get("tool_calls")
                 if tool_calls:
+                    # Ensure each tool_call has type: "function"
+                    for tc in tool_calls:
+                        if "type" not in tc:
+                            tc["type"] = "function"
                     messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
                 elif content:
                     messages.append({"role": "assistant", "content": content})
@@ -119,24 +123,31 @@ class AgentLoop:
                 nudge_added = True
 
             try:
-                response = await self.provider.chat(
+                # Use streaming to display tokens in real-time
+                stream = await self.provider.chat(
                     messages=messages,
                     model=agent_model,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     tools=tool_schemas if tool_schemas else None,
                     tool_choice="auto" if tool_schemas else None,
+                    stream=True,
                 )
+                assistant_content = ""
+                tool_calls = []
+                async for chunk in stream:
+                    if chunk["type"] == "content":
+                        assistant_content += chunk["content"]
+                        if on_message:
+                            await on_message("stream", chunk["content"])
+                    elif chunk["type"] == "tool_call":
+                        tool_calls.append(chunk["tool_call"])
             except Exception as e:
                 error_msg = f"LLM error: {e}"
                 logger.error("LLM call failed: %s", e)
-                messages.append({"role": "assistant", "content": error_msg})
                 if on_message:
                     await on_message("error", error_msg)
                 break
-
-            assistant_content = response.get("content", "")
-            tool_calls = response.get("tool_calls", [])
 
             # Build single assistant message (content + tool_calls must be together)
             assistant_msg = {"role": "assistant"}
@@ -151,8 +162,6 @@ class AgentLoop:
                     "content": assistant_content or "",
                     "tool_calls": tool_calls if tool_calls else None,
                 })
-                if assistant_content and on_message:
-                    await on_message("assistant", assistant_content)
 
             if not tool_calls:
                 break
@@ -168,14 +177,20 @@ class AgentLoop:
                 tool = self.tools.get(fn_name)
                 if not tool:
                     tool_result = json.dumps({"error": f"Unknown tool: {fn_name}"})
+                    if on_tool_result:
+                        await on_tool_result(fn_name, tool_result, False)
                 else:
                     if on_tool_call:
                         await on_tool_call(fn_name, fn_args)
                     try:
                         result = await tool.execute(fn_args, ctx)
                         tool_result = result.output
+                        if on_tool_result:
+                            await on_tool_result(fn_name, tool_result, True)
                     except Exception as e:
                         tool_result = f"Tool error: {e}"
+                        if on_tool_result:
+                            await on_tool_result(fn_name, tool_result, False)
 
                 # Store tool result
                 messages.append({
@@ -188,6 +203,10 @@ class AgentLoop:
                 })
 
         self._running = False
+
+        # Notify agent finished
+        if on_message:
+            await on_message("finish", "")
 
         last_assistant = ""
         for m in reversed(messages):

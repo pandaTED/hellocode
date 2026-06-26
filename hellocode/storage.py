@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import time
 import uuid
@@ -225,13 +226,16 @@ class Storage:
 
     def _migrate_memory_fts(self):
         cur = self.conn.cursor()
-        # Force rebuild FTS tables to ensure correct schema
         try:
-            cur.execute("DROP TABLE IF EXISTS memory_fts")
-            cur.execute("DROP TABLE IF EXISTS memory_fts_content")
-            logger.info("Rebuilt memory_fts tables")
+            cur.execute("SELECT 1 FROM memory_fts LIMIT 1")
         except sqlite3.OperationalError:
-            pass
+            try:
+                cur.execute("DROP TABLE IF EXISTS memory_fts")
+                cur.execute("DROP TABLE IF EXISTS memory_fts_content")
+                cur.executescript(FTS_SCHEMA)
+                logger.info("Created memory_fts tables")
+            except sqlite3.OperationalError:
+                pass
 
     def _migrate_project_table(self):
         cur = self.conn.cursor()
@@ -260,10 +264,17 @@ class Storage:
             return None
         return json.loads(s)
 
+    @staticmethod
+    def _safe_column_name(name: str) -> str:
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+            raise ValueError(f"Invalid column name: {name}")
+        return name
+
     # ── Project ──
 
     def _get_not_null_columns(self, table: str) -> list[dict]:
-        rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        safe_table = self._safe_column_name(table)
+        rows = self.conn.execute(f"PRAGMA table_info({safe_table})").fetchall()
         return [{"name": r[1], "notnull": r[3], "default": r[4]} for r in rows]
 
     def _fill_defaults(self, table: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -284,6 +295,8 @@ class Storage:
         result: dict[str, Any] = {}
         for col in cols:
             name = col["name"]
+            if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+                continue
             if overrides and name in overrides:
                 result[name] = overrides[name]
             elif col["notnull"] and col["default"] is None:
@@ -296,7 +309,8 @@ class Storage:
 
     def create_project(self, worktree: str, name: str | None = None, vcs: str = "git") -> dict:
         vals = self._fill_defaults("project", {"worktree": worktree, "name": name, "vcs": vcs})
-        cols_str = ", ".join(vals.keys())
+        cols = [self._safe_column_name(k) for k in vals.keys()]
+        cols_str = ", ".join(cols)
         placeholders = ", ".join(["?"] * len(vals))
         self.conn.execute(
             f"INSERT INTO project ({cols_str}) VALUES ({placeholders})",
@@ -319,7 +333,8 @@ class Storage:
         vals = self._fill_defaults("session", {
             "project_id": project_id, "directory": directory, "title": title,
         })
-        cols_str = ", ".join(vals.keys())
+        cols = [self._safe_column_name(k) for k in vals.keys()]
+        cols_str = ", ".join(cols)
         placeholders = ", ".join(["?"] * len(vals))
         self.conn.execute(
             f"INSERT INTO session ({cols_str}) VALUES ({placeholders})",
@@ -336,7 +351,8 @@ class Storage:
         sets = []
         vals = []
         for k, v in kwargs.items():
-            sets.append(f"{k}=?")
+            safe_name = self._safe_column_name(k)
+            sets.append(f"{safe_name}=?")
             vals.append(v)
         sets.append("time_updated=?")
         vals.append(self.now())
@@ -357,7 +373,8 @@ class Storage:
         vals = self._fill_defaults("message", {
             "session_id": session_id, "agent_id": agent_id, "data": self._d(data),
         })
-        cols_str = ", ".join(vals.keys())
+        cols = [self._safe_column_name(k) for k in vals.keys()]
+        cols_str = ", ".join(cols)
         placeholders = ", ".join(["?"] * len(vals))
         self.conn.execute(
             f"INSERT INTO message ({cols_str}) VALUES ({placeholders})",
@@ -392,7 +409,8 @@ class Storage:
         vals = self._fill_defaults("part", {
             "message_id": message_id, "session_id": session_id, "data": self._d(data),
         })
-        cols_str = ", ".join(vals.keys())
+        cols = [self._safe_column_name(k) for k in vals.keys()]
+        cols_str = ", ".join(cols)
         placeholders = ", ".join(["?"] * len(vals))
         self.conn.execute(
             f"INSERT INTO part ({cols_str}) VALUES ({placeholders})",
@@ -424,13 +442,15 @@ class Storage:
     def update_task(self, session_id: str, task_id: str, status: str | None = None, summary: str | None = None) -> None:
         now = self.now()
         if status:
+            safe_status = self._safe_column_name("status")
             self.conn.execute(
-                "UPDATE task SET status=?, last_event_at=? WHERE session_id=? AND id=?",
+                f"UPDATE task SET {safe_status}=?, last_event_at=? WHERE session_id=? AND id=?",
                 (status, now, session_id, task_id),
             )
         if summary:
+            safe_summary = self._safe_column_name("summary")
             self.conn.execute(
-                "UPDATE task SET summary=?, last_event_at=? WHERE session_id=? AND id=?",
+                f"UPDATE task SET {safe_summary}=?, last_event_at=? WHERE session_id=? AND id=?",
                 (summary, now, session_id, task_id),
             )
         self.conn.commit()
@@ -502,7 +522,8 @@ class Storage:
         sets = []
         vals = []
         for k, v in kwargs.items():
-            sets.append(f"{k}=?")
+            safe_name = self._safe_column_name(k)
+            sets.append(f"{safe_name}=?")
             vals.append(self._d(v) if isinstance(v, (list, dict)) else v)
         vals.append(session_id)
         vals.append(actor_id)
@@ -737,7 +758,8 @@ class Storage:
         sets = []
         vals = []
         for k, v in kwargs.items():
-            sets.append(f"{k}=?")
+            safe_name = self._safe_column_name(k)
+            sets.append(f"{safe_name}=?")
             vals.append(self._d(v) if isinstance(v, (list, dict)) else v)
         vals.append(wid)
         self.conn.execute(f"UPDATE workflow_run SET {','.join(sets)} WHERE id=?", vals)

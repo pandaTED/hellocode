@@ -1,73 +1,136 @@
-"""Terminal UI with visual input/output separation."""
+"""Terminal UI with prompt_toolkit input, rich markdown rendering, and split-panel layout."""
 
 from __future__ import annotations
 
+import io
+import os
+import sys
 import asyncio
 from datetime import datetime
+from collections import deque
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.columns import Columns
+from rich.layout import Layout
+from rich.live import Live
 
 
-BANNER = "[bold green]HelloCode v0.1.0[/bold green]"
-SEP = "[dim]" + "━" * 60 + "[/dim]"
+def _make_console() -> Console:
+    if sys.platform == "win32":
+        stdout_utf8 = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        return Console(file=stdout_utf8, force_terminal=True)
+    return Console(force_terminal=True)
 
 
 class TUI:
     def __init__(self):
-        self.console = Console()
-        self._prompt_session: PromptSession | None = None
+        self.console = _make_console()
+        self._stream_buf = ""
+        self._prompt_session = None
+        self._tool_history: deque[dict] = deque(maxlen=50)
+        self._right_width = 0
+        self._left_width = 0
+        self._terminal_height = 0
 
-    def setup_completer(self, tool_names: list[str]):
-        completer = WordCompleter(tool_names, ignore_case=True)
-        self._prompt_session = PromptSession(
-            completer=completer,
-            history=InMemoryHistory(),
-        )
+    def _setup_layout(self):
+        try:
+            size = os.get_terminal_size()
+            self._terminal_height = size.lines
+            self._right_width = max(20, size.columns // 5)
+            self._left_width = size.columns - self._right_width - 3
+        except Exception:
+            self._left_width = 80
+            self._right_width = 20
 
-    def _sep(self):
-        self.console.print(SEP)
+    def _setup_prompt(self):
+        try:
+            from prompt_toolkit import PromptSession
+            self._prompt_session = PromptSession(history=None)
+        except Exception:
+            pass
+
+    def _render_markdown(self, content: str) -> Panel:
+        md = Markdown(content)
+        return Panel(md, border_style="green", padding=(0, 1))
+
+    def _render_right_panel(self) -> Panel:
+        if not self._tool_history:
+            return Panel("[dim]No tool calls yet[/dim]", title="Tool History", border_style="cyan", width=self._right_width)
+
+        lines = []
+        for i, entry in enumerate(self._tool_history):
+            name = entry.get("name", "?")
+            status = entry.get("status", "pending")
+            result_preview = entry.get("result", "")[:80]
+            icon = {"ok": "[green]✓[/green]", "error": "[red]✗[/red]", "pending": "[yellow]⏳[/yellow]"}.get(status, "?")
+            lines.append(f"{icon} [bold]{name}[/bold]")
+            if result_preview:
+                lines.append(f"  [dim]{result_preview}[/dim]")
+            lines.append("")
+
+        content = "\n".join(lines[-30:])
+        return Panel(content, title="Tool History", border_style="cyan", width=self._right_width)
 
     def print_banner(self):
-        self.console.print(BANNER)
+        from . import __version__
+        self._setup_layout()
+        self.console.print(f"[bold green]HelloCode v{__version__}[/bold green]")
         self.console.print("[dim]Type /help for commands, /exit to quit[/dim]")
-        self.console.print()
+        print()
 
     def print_welcome(self, session_title: str = "New Session"):
-        self.console.print()
-        self.console.print(Panel(
-            f"[bold]Session:[/bold] {session_title}",
-            border_style="cyan", width=60,
-        ))
+        pass
 
     def print_info(self, message: str):
-        self.console.print(f"[cyan]{message}[/cyan]")
+        self.console.print(self._render_markdown(message))
 
     def print_system(self, message: str):
         self.console.print(f"[dim]{message}[/dim]")
 
     def print_assistant(self, content: str):
-        self._sep()
-        try:
-            md = __import__("rich.markdown", fromlist=["Markdown"]).Markdown(content)
-            self.console.print(Panel(md, border_style="green", padding=(0, 1)))
-        except Exception:
-            self.console.print(Panel(content, border_style="green"))
-        self._sep()
+        self.console.print(self._render_markdown(content))
+        self._print_tool_panel()
 
     def print_tool_call(self, tool_name: str, args: dict):
-        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-        self.console.print(f"  [bold cyan]>[/bold cyan] {tool_name}({args_str})", highlight=False)
+        def truncate(v, n=60):
+            s = repr(v)
+            return s[:n] + "..." if len(s) > n else s
+        args_str = ", ".join(f"{k}={truncate(v)}" for k, v in args.items())
+        self._tool_history.append({
+            "name": tool_name,
+            "args": args_str,
+            "status": "pending",
+            "result": "",
+            "time": datetime.now().strftime("%H:%M:%S"),
+        })
+        self.console.print(f"  [dim cyan]▸ {tool_name}[/dim cyan] [dim]({args_str})[/dim]")
 
     def print_tool_result(self, tool_name: str, result: str, success: bool = True):
-        style = "green" if success else "red"
-        truncated = result[:400] + "..." if len(result) > 400 else result
-        self.console.print(f"  [{style}]✓[/{style}] {truncated}", highlight=False)
+        for entry in reversed(self._tool_history):
+            if entry["name"] == tool_name and entry["status"] == "pending":
+                entry["status"] = "ok" if success else "error"
+                entry["result"] = result[:200]
+                break
+        prefix = "[green]✓[/green]" if success else "[red]✗[/red]"
+        truncated = result[:150] + "..." if len(result) > 150 else result
+        self.console.print(f"  {prefix} [dim]{truncated}[/dim]")
+
+    def _print_tool_panel(self):
+        if not self._tool_history:
+            return
+        table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
+        table.add_column("Tool", style="bold", width=16)
+        table.add_column("Status", width=8)
+        table.add_column("Result", width=self._left_width - 30 if self._left_width > 30 else 40, overflow="ellipsis")
+        for entry in list(self._tool_history)[-8:]:
+            icon = {"ok": "[green]✓[/green]", "error": "[red]✗[/red]", "pending": "[yellow]⏳[/yellow]"}.get(entry["status"], "?")
+            result_short = entry["result"][:60] + "..." if len(entry["result"]) > 60 else entry["result"]
+            table.add_row(entry["name"], icon, f"[dim]{result_short}[/dim]")
+        self.console.print(Panel(table, title="[bold]Tool Execution Audit[/bold]", border_style="dim cyan", padding=(0, 1)))
 
     def print_error(self, message: str):
         self.console.print(f"[bold red]Error:[/bold red] {message}")
@@ -76,58 +139,60 @@ class TUI:
         self.console.print(f"[bold yellow]Warning:[/bold yellow] {message}")
 
     def print_task_update(self, task_id: str, status: str, summary: str):
-        icons = {
-            "open": "[blue]○[/blue]",
-            "in_progress": "[yellow]●[/yellow]",
-            "blocked": "[red]⊘[/red]",
-            "done": "[green]✓[/green]",
-            "abandoned": "[dim]✗[/dim]",
-        }
-        icon = icons.get(status, "?")
-        self.console.print(f"  {icon} {task_id}: {summary}")
+        icons = {"open": "○", "in_progress": "●", "blocked": "⊘", "done": "✓", "abandoned": "✗"}
+        self.console.print(f"  {icons.get(status, '?')} {task_id}: {summary}")
 
     def print_tasks(self, tasks: list[dict]):
-        self.print_tasks_table(tasks)
-
-    def print_tasks_table(self, tasks: list[dict]):
         if not tasks:
-            self.console.print("  [dim]No tasks[/dim]")
+            self.console.print("  No tasks")
             return
-        table = Table(show_header=True, header_style="bold", border_style="dim")
-        table.add_column("ID", style="cyan", width=10)
-        table.add_column("Status", width=12)
-        table.add_column("Summary")
+        lines = ["  Tasks:"]
         for t in tasks:
-            s = t.get("status", "?")
-            st = {"done": "green", "in_progress": "yellow", "blocked": "red"}.get(s, "white")
-            table.add_row(t["id"], Text(s, style=st), t.get("summary", ""))
-        self.console.print(table)
+            lines.append(f"    {t['id']}: {t.get('summary', '')} [{t.get('status', '?')}]")
+        self.console.print("\n".join(lines))
 
     def print_sessions(self, sessions: list[dict]):
         if not sessions:
-            self.console.print("  [dim]No sessions[/dim]")
+            self.console.print("  No sessions")
             return
-        table = Table(show_header=True, header_style="bold", border_style="dim")
-        table.add_column("ID", style="cyan", width=16)
-        table.add_column("Title")
-        table.add_column("Updated", width=14)
+        lines = ["  Sessions:"]
         for s in sessions:
             ts = s.get("time_updated", 0)
             dt = datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M") if ts else "?"
-            table.add_row(s["id"], s.get("title", ""), dt)
-        self.console.print(table)
+            lines.append(f"    {s['id']}: {s.get('title', '')} [{dt}]")
+        self.console.print("\n".join(lines))
 
     def print_help(self):
-        self.console.print(Panel(
-            "[bold]/help[/bold]       Show this help\n"
-            "[bold]/quit[/bold]       Exit\n"
-            "[bold]/tasks[/bold]      List tasks\n"
-            "[bold]/sessions[/bold]   List sessions\n"
-            "[bold]/clear[/bold]      Clear screen\n"
-            "[bold]/memory[/bold] q   Search memory\n"
-            "[bold]/new[/bold]        New session",
-            title="Commands", border_style="cyan",
-        ))
+        help_text = (
+            "**Commands:**\n\n"
+            "| Command | Description |\n"
+            "|---------|-------------|\n"
+            "| `/help` | Show this help |\n"
+            "| `/exit` | Exit |\n"
+            "| `/tasks` | List tasks |\n"
+            "| `/sessions` | List sessions |\n"
+            "| `/clear` | Clear screen |\n"
+            "| `/memory <query>` | Search memory |\n"
+            "| `/new` | New session |"
+        )
+        self.console.print(self._render_markdown(help_text))
+
+    def print_streaming(self, token: str):
+        self._stream_buf += token
+
+    def finish_streaming(self):
+        if self._stream_buf.strip():
+            self.console.print(self._render_markdown(self._stream_buf.strip()))
+        self._stream_buf = ""
+
+    def print_streaming_end(self):
+        self.finish_streaming()
+
+    def finish_output(self):
+        self.finish_streaming()
+
+    def clear_tool_history(self):
+        self._tool_history.clear()
 
     async def get_input(self, session_id: str = "") -> str:
         try:
@@ -142,8 +207,11 @@ class TUI:
         except (KeyboardInterrupt, EOFError):
             return "/exit"
 
-    def print_streaming(self, token: str):
-        self.console.print(token, end="", highlight=False)
-
-    def print_streaming_end(self):
-        self.console.print()
+    def setup_completer(self, tool_names: list[str]):
+        try:
+            from prompt_toolkit.completion import WordCompleter
+            completer = WordCompleter(tool_names, ignore_case=True)
+            if self._prompt_session:
+                self._prompt_session = PromptSession(completer=completer)
+        except Exception:
+            pass

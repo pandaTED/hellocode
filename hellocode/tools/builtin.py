@@ -5,10 +5,8 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
-import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -138,9 +136,8 @@ class GlobTool(Tool):
         base = Path(args.get("path") or ctx.workdir)
         matches = []
         try:
-            for p in base.rglob("*"):
-                if p.match(pattern):
-                    matches.append(str(p.relative_to(base)))
+            for p in base.glob(pattern):
+                matches.append(str(p.relative_to(base)))
         except Exception as e:
             return ExecuteResult(title="Error", output=str(e))
         matches.sort()

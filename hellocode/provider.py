@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import time
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
@@ -92,7 +90,7 @@ class LLMProvider:
                         if current_tool_call is None or current_tool_call.get("_idx") != tc.index:
                             if current_tool_call:
                                 yield {"type": "tool_call", "tool_call": current_tool_call}
-                            current_tool_call = {"_idx": tc.index, "id": tc.id or "", "function": {"name": "", "arguments": ""}}
+                            current_tool_call = {"_idx": tc.index, "id": tc.id or "", "type": "function", "function": {"name": "", "arguments": ""}}
                         if tc.id:
                             current_tool_call["id"] = tc.id
                         if tc.function:

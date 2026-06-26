@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import json
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +54,6 @@ class WorkflowRunner:
                 "True": True, "False": False, "None": None,
                 "Exception": Exception, "ValueError": ValueError,
                 "TypeError": TypeError, "KeyError": KeyError,
-                "__import__": __import__,
             }
             ns: dict[str, Any] = {
                 "__builtins__": safe_builtins,

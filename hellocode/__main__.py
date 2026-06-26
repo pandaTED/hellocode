@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import signal
-import sys
+import os
 from pathlib import Path
 
+from . import __version__
 from .config import Config
 from .storage import Storage
 from .provider import LLMProvider
@@ -28,105 +28,125 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, help="Data directory for storage/memory")
     parser.add_argument("--session-id", help="Resume a previous session")
     parser.add_argument("--no-tui", action="store_true", help="Disable TUI, plain text output")
-    parser.add_argument("--version", "-v", action="version", version="HelloCode 0.1.0")
+    parser.add_argument("--version", "-v", action="version", version=f"HelloCode {__version__}")
     return parser.parse_args()
 
 
-async def run_interactive(loop: AgentLoop, session_id: str, agent_name: str, workdir: Path):
+async def run_interactive(loop: AgentLoop, session_id: str, agent_name: str, workdir: Path, use_tui: bool = True):
     from .tui import TUI
 
     tui = TUI()
-    tui.print_banner()
+    if use_tui:
+        tui._setup_prompt()
+        tui.print_banner()
+
+    _in_system_reminder = False
+    _session = {"id": session_id}
 
     async def on_tool_call(name: str, args: dict):
+        nonlocal _in_system_reminder
+        _in_system_reminder = False
+        tui.finish_streaming()
         tui.print_tool_call(name, args)
 
+    async def on_tool_result(name: str, result: str, success: bool = True):
+        tui.print_tool_result(name, result, success)
+
     async def on_message(kind: str, content: str):
-        if kind == "error":
+        nonlocal _in_system_reminder
+        if kind == "stream":
+            if "<system-reminder>" in content:
+                _in_system_reminder = True
+                parts = content.split("<system-reminder>")
+                content = parts[0] if parts else ""
+            if _in_system_reminder:
+                if "</system-reminder>" in content:
+                    _in_system_reminder = False
+                    content = content.split("</system-reminder>")[-1]
+                else:
+                    return
+            if content:
+                tui.print_streaming(content)
+        elif kind == "finish":
+            tui.finish_streaming()
+        elif kind == "error":
+            _in_system_reminder = False
+            tui.finish_streaming()
             tui.print_error(content)
 
-    def on_sigint(sig, frame):
-        loop.abort()
-        tui.print_warning("\nInterrupted")
+    async def on_submit(user_input: str):
+        if not user_input.strip():
+            return
 
-    signal.signal(signal.SIGINT, on_sigint)
+        if user_input.strip() in ("/exit", "/quit", "/q"):
+            return "exit"
 
-    while True:
-        try:
-            user_input = await tui.get_input()
-        except (KeyboardInterrupt, EOFError):
-            tui.print_info("Goodbye!")
-            break
-
-        user_input = user_input.strip()
-        if not user_input:
-            continue
-
-        if user_input in ("/exit", "/quit", "/q"):
-            tui.print_info("Goodbye!")
-            break
-
-        if user_input == "/help":
+        if user_input.strip() == "/help":
             tui.print_help()
-            continue
+            return
 
-        if user_input == "/clear":
-            tui.console.clear()
-            continue
+        if user_input.strip() == "/clear":
+            os.system("cls" if os.name == "nt" else "clear")
+            return
 
-        if user_input == "/tasks":
-            tasks = loop.storage.list_tasks(session_id)
+        if user_input.strip() == "/tasks":
+            tasks = loop.storage.list_tasks(_session["id"])
             tui.print_tasks(tasks)
-            continue
+            return
 
-        if user_input == "/sessions":
-            sess = loop.storage.get_session(session_id)
-            pid = sess["project_id"] if sess and "project_id" in sess.keys() else ""
+        if user_input.strip() == "/sessions":
+            sess = loop.storage.get_session(_session["id"])
+            pid = sess["project_id"] if sess and "project_id" in sess else ""
             sessions = loop.storage.list_sessions(pid)
             tui.print_sessions(sessions)
-            continue
+            return
 
-        if user_input == "/new":
-            sess = loop.storage.get_session(session_id)
-            pid = sess["project_id"] if sess and "project_id" in sess.keys() else ""
-            session = loop.storage.create_session(
-                pid,
-                str(workdir),
-                "New Session",
-            )
-            session_id = session["id"]
-            tui.print_info(f"New session: {session_id}")
-            continue
+        if user_input.strip() == "/new":
+            sess = loop.storage.get_session(_session["id"])
+            pid = sess["project_id"] if sess and "project_id" in sess else ""
+            session = loop.storage.create_session(pid, str(workdir), "New Session")
+            _session["id"] = session["id"]
+            tui.print_info(f"New session: {_session['id']}")
+            return
 
-        if user_input.startswith("/memory "):
-            query = user_input[8:].strip()
+        if user_input.strip().startswith("/memory "):
+            query = user_input.strip()[8:].strip()
             results = loop.memory.search(query)
             if results:
                 for r in results:
                     tui.print_info(f"[{r['scope']}] {r['path']}: {r['body'][:200]}")
             else:
                 tui.print_info("No results found")
-            continue
+            return
 
-        if user_input.startswith("/"):
+        if user_input.strip().startswith("/"):
             tui.print_error(f"Unknown command: {user_input}")
-            continue
-
-        tui.print_system(f"You: {user_input}")
+            return
 
         try:
-            response = await loop.run(
-                session_id=session_id,
+            tui.clear_tool_history()
+            await loop.run(
+                session_id=_session["id"],
                 user_input=user_input,
                 agent_name=agent_name,
                 workdir=workdir,
                 on_tool_call=on_tool_call,
+                on_tool_result=on_tool_result,
                 on_message=on_message,
             )
-            if response:
-                tui.print_assistant(response)
         except Exception as e:
             tui.print_error(f"Error: {e}")
+
+    # Main loop
+    while True:
+        try:
+            user_input = await tui.get_input()
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        result = await on_submit(user_input)
+        if result == "exit":
+            break
 
 
 async def run_one_shot(loop: AgentLoop, session_id: str, prompt: str, agent_name: str, workdir: Path):
@@ -177,7 +197,7 @@ async def async_main(args: argparse.Namespace):
         prompt = " ".join(args.prompt)
         await run_one_shot(loop, session_id, prompt, args.agent, workdir)
     else:
-        await run_interactive(loop, session_id, args.agent, workdir)
+        await run_interactive(loop, session_id, args.agent, workdir, use_tui=not args.no_tui)
 
     storage.close()
 
@@ -185,10 +205,14 @@ async def async_main(args: argparse.Namespace):
 def main():
     import logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.WARNING,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("hellocode").setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
     args = parse_args()
     try:
         asyncio.run(async_main(args))
