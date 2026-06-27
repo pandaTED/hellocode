@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
+import threading
 from pathlib import Path
 
 from . import __version__
@@ -14,6 +16,68 @@ from .provider import LLMProvider
 from .memory import MemorySystem
 from .agent import AgentLoop, ActorManager
 from .tools import create_registry
+from .mcp import MCPClient
+
+
+def _has_display() -> bool:
+    """Check if a graphical display is available."""
+    if sys.platform == "win32":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _resolve_mode(args) -> str:
+    """Determine launch mode: 'gui', 'cli', or 'plain'."""
+    if args.gui:
+        return "gui"
+    if args.cli or args.no_tui:
+        return "plain"
+    if args.prompt:
+        return "plain"
+
+    # Auto-detect: use GUI if display available, else CLI
+    if _has_display():
+        try:
+            import PySide6  # noqa: F401
+            return "gui"
+        except ImportError:
+            return "cli"
+    return "cli"
+
+
+def _connect_mcp_for_gui(config: Config, tools) -> tuple[MCPClient, tuple[asyncio.AbstractEventLoop, threading.Thread] | None]:
+    mcp_client = MCPClient(config)
+    if not config.mcp.servers:
+        return mcp_client, None
+
+    loop = asyncio.new_event_loop()
+
+    def run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    thread = threading.Thread(target=run_loop, name="hellocode-mcp", daemon=True)
+    thread.start()
+    future = asyncio.run_coroutine_threadsafe(mcp_client.connect_all(), loop)
+    for tool in future.result(timeout=60):
+        tools.register(tool)
+    return mcp_client, (loop, thread)
+
+
+def _disconnect_mcp_for_gui(
+    mcp_client: MCPClient,
+    runtime: tuple[asyncio.AbstractEventLoop, threading.Thread] | None,
+) -> None:
+    if not runtime:
+        return
+    loop, thread = runtime
+    future = asyncio.run_coroutine_threadsafe(mcp_client.disconnect_all(), loop)
+    try:
+        future.result(timeout=10)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,7 +91,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workdir", "-d", type=Path, help="Working directory")
     parser.add_argument("--data-dir", type=Path, help="Data directory for storage/memory")
     parser.add_argument("--session-id", help="Resume a previous session")
-    parser.add_argument("--no-tui", action="store_true", help="Disable TUI, plain text output")
+    parser.add_argument("--gui", action="store_true", help="Force GUI mode (requires PySide6)")
+    parser.add_argument("--cli", action="store_true", help="Force CLI/TUI mode")
+    parser.add_argument("--no-tui", action="store_true", help="Plain text output (no TUI)")
     parser.add_argument("--version", "-v", action="version", version=f"HelloCode {__version__}")
     return parser.parse_args()
 
@@ -55,14 +121,20 @@ async def run_interactive(loop: AgentLoop, session_id: str, agent_name: str, wor
     async def on_message(kind: str, content: str):
         nonlocal _in_system_reminder
         if kind == "stream":
-            if "<system-reminder>" in content:
-                _in_system_reminder = True
-                parts = content.split("<system-reminder>")
-                content = parts[0] if parts else ""
+            while "<system-reminder>" in content:
+                idx = content.index("<system-reminder>")
+                before = content[:idx]
+                rest = content[idx + len("<system-reminder>"):]
+                end_idx = rest.find("</system-reminder>")
+                if end_idx >= 0:
+                    content = before + rest[end_idx + len("</system-reminder>"):]
+                else:
+                    content = before
+                    _in_system_reminder = True
             if _in_system_reminder:
                 if "</system-reminder>" in content:
                     _in_system_reminder = False
-                    content = content.split("</system-reminder>")[-1]
+                    content = content.split("</system-reminder>", 1)[-1]
                 else:
                     return
             if content:
@@ -86,7 +158,7 @@ async def run_interactive(loop: AgentLoop, session_id: str, agent_name: str, wor
             return
 
         if user_input.strip() == "/clear":
-            os.system("cls" if os.name == "nt" else "clear")
+            tui.console.clear()
             return
 
         if user_input.strip() == "/tasks":
@@ -159,6 +231,74 @@ async def run_one_shot(loop: AgentLoop, session_id: str, prompt: str, agent_name
     print(response)
 
 
+def launch_gui(args: argparse.Namespace):
+    """Launch the PySide6 GUI."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError:
+        print("Error: PySide6 is required for GUI mode.")
+        print("Install it with: pip install PySide6")
+        return
+
+    workdir = (args.workdir or Path.cwd()).resolve()
+    data_dir = args.data_dir or (Path.home() / ".local" / "share" / "hellocode")
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    config = Config.load(workdir)
+    if args.model:
+        pname = config.provider.default
+        if pname not in config.provider.providers:
+            config.provider.providers[pname] = {}
+        config.provider.providers[pname]["model"] = args.model
+
+    storage = Storage(data_dir / "hellocode.db")
+    provider = LLMProvider(config)
+    memory = MemorySystem(storage, data_dir)
+    tools = create_registry()
+    mcp_client, mcp_runtime = _connect_mcp_for_gui(config, tools)
+    agent_loop = AgentLoop(config, storage, provider, tools, memory)
+    actor_manager = ActorManager(storage, provider, tools, memory, config)
+    actor_manager.set_loop(agent_loop)
+    agent_loop.actor_manager = actor_manager
+
+    project = storage.find_project_by_worktree(str(workdir))
+    if not project:
+        project = storage.create_project(str(workdir), workdir.name)
+
+    if args.session_id:
+        session = storage.get_session(args.session_id)
+        if session:
+            session_id = args.session_id
+        else:
+            s = storage.create_session(project["id"], str(workdir))
+            session_id = s["id"]
+    else:
+        s = storage.create_session(project["id"], str(workdir))
+        session_id = s["id"]
+
+    app = QApplication([])
+    app.setApplicationName("HelloCode")
+    app.setApplicationVersion(__version__)
+
+    from .gui import HelloCodeGUI
+    window = HelloCodeGUI(
+        config=config,
+        storage=storage,
+        provider=provider,
+        memory=memory,
+        agent_loop=agent_loop,
+        actor_manager=actor_manager,
+        workdir=workdir,
+        project=project,
+        session_id=session_id,
+    )
+    window.show()
+    try:
+        app.exec()
+    finally:
+        _disconnect_mcp_for_gui(mcp_client, mcp_runtime)
+
+
 async def async_main(args: argparse.Namespace):
     workdir = (args.workdir or Path.cwd()).resolve()
     data_dir = args.data_dir or (Path.home() / ".local" / "share" / "hellocode")
@@ -166,16 +306,21 @@ async def async_main(args: argparse.Namespace):
 
     config = Config.load(workdir)
     if args.model:
-        if config.provider.default not in config.provider.__dict__:
-            config.provider.__dict__[config.provider.default] = {}
-        config.provider.__dict__[config.provider.default]["model"] = args.model
+        pname = config.provider.default
+        if pname not in config.provider.providers:
+            config.provider.providers[pname] = {}
+        config.provider.providers[pname]["model"] = args.model
 
-    storage = Storage(data_dir / "minicode_python.db")
+    storage = Storage(data_dir / "hellocode.db")
     provider = LLMProvider(config)
     memory = MemorySystem(storage, data_dir)
     tools = create_registry()
+    mcp_client = MCPClient(config)
+    for tool in await mcp_client.connect_all():
+        tools.register(tool)
     loop = AgentLoop(config, storage, provider, tools, memory)
     actor_manager = ActorManager(storage, provider, tools, memory, config)
+    actor_manager.set_loop(loop)
     loop.actor_manager = actor_manager
 
     project = storage.find_project_by_worktree(str(workdir))
@@ -193,13 +338,15 @@ async def async_main(args: argparse.Namespace):
         s = storage.create_session(project["id"], str(workdir))
         session_id = s["id"]
 
-    if args.prompt:
-        prompt = " ".join(args.prompt)
-        await run_one_shot(loop, session_id, prompt, args.agent, workdir)
-    else:
-        await run_interactive(loop, session_id, args.agent, workdir, use_tui=not args.no_tui)
-
-    storage.close()
+    try:
+        if args.prompt:
+            prompt = " ".join(args.prompt)
+            await run_one_shot(loop, session_id, prompt, args.agent, workdir)
+        else:
+            await run_interactive(loop, session_id, args.agent, workdir, use_tui=not args.no_tui)
+    finally:
+        await mcp_client.disconnect_all()
+        storage.close()
 
 
 def main():
@@ -214,6 +361,13 @@ def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
     args = parse_args()
+
+    mode = _resolve_mode(args)
+
+    if mode == "gui":
+        launch_gui(args)
+        return
+
     try:
         asyncio.run(async_main(args))
     except KeyboardInterrupt:

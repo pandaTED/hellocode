@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, AsyncIterator
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 
 logger = logging.getLogger("hellocode.provider")
 
@@ -24,6 +25,8 @@ class LLMProvider:
             kwargs["default_headers"] = headers
         api_key = config.get_provider_key() or "sk-placeholder"
         self.client = AsyncOpenAI(api_key=api_key, **kwargs)
+        self._max_retries = 3
+        self._base_delay = 2.0
 
     def get_model(self, agent_name: str | None = None) -> str:
         return self.config.get_provider_model(agent_name)
@@ -51,56 +54,86 @@ class LLMProvider:
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
         if stream:
-            return self._stream(kwargs)
-        resp = await self.client.chat.completions.create(**kwargs)
-        logger.debug("LLM response: model=%s, choices=%d", resp.model, len(resp.choices))
-        if not resp.choices:
-            raise ValueError(f"LLM returned empty choices. Finish reason: {resp.choices if hasattr(resp, 'choices') else 'unknown'}")
-        choice = resp.choices[0]
-        result: dict[str, Any] = {
-            "role": "assistant",
-            "content": choice.message.content or "",
-        }
-        if choice.message.tool_calls:
-            result["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
+            return self._stream_with_retry(kwargs)
+
+        for attempt in range(self._max_retries):
+            try:
+                resp = await self.client.chat.completions.create(**kwargs)
+                logger.debug("LLM response: model=%s, choices=%d", resp.model, len(resp.choices))
+                if not resp.choices:
+                    raise ValueError("LLM returned empty choices")
+                choice = resp.choices[0]
+                result: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": choice.message.content or "",
                 }
-                for tc in choice.message.tool_calls
-            ]
-        return result
+                if choice.message.tool_calls:
+                    result["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in choice.message.tool_calls
+                    ]
+                return result
+            except RateLimitError as e:
+                if attempt < self._max_retries - 1:
+                    delay = self._base_delay * (2 ** attempt)
+                    logger.warning("Rate limited, retrying in %.1fs (attempt %d/%d)", delay, attempt + 1, self._max_retries)
+                    await asyncio.sleep(delay)
+                else:
+                    raise
 
     async def _stream(self, kwargs: dict) -> AsyncIterator[dict[str, Any]]:
         stream = await self.client.chat.completions.create(**kwargs, stream=True)
-        current_tool_call: dict | None = None
+        tool_calls: dict[int, dict[str, Any]] = {}
         async for chunk in stream:
-            delta = chunk.choices[0].delta if chunk.choices else None
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
             if not delta:
                 continue
             if delta.content:
                 yield {"type": "content", "content": delta.content}
             if delta.tool_calls:
                 for tc in delta.tool_calls:
-                    if tc.index is not None:
-                        if current_tool_call is None or current_tool_call.get("_idx") != tc.index:
-                            if current_tool_call:
-                                yield {"type": "tool_call", "tool_call": current_tool_call}
-                            current_tool_call = {"_idx": tc.index, "id": tc.id or "", "type": "function", "function": {"name": "", "arguments": ""}}
-                        if tc.id:
-                            current_tool_call["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                current_tool_call["function"]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                current_tool_call["function"]["arguments"] += tc.function.arguments
-        if current_tool_call:
-            current_tool_call.pop("_idx", None)
-            yield {"type": "tool_call", "tool_call": current_tool_call}
+                    if tc.index is None:
+                        continue
+                    current = tool_calls.setdefault(
+                        tc.index,
+                        {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    if tc.id:
+                        current["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            current["function"]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            current["function"]["arguments"] += tc.function.arguments
+        for idx in sorted(tool_calls):
+            yield {"type": "tool_call", "tool_call": tool_calls[idx]}
+
+    async def _stream_with_retry(self, kwargs: dict) -> AsyncIterator[dict[str, Any]]:
+        for attempt in range(self._max_retries):
+            try:
+                async for chunk in self._stream(kwargs):
+                    yield chunk
+                return
+            except RateLimitError as e:
+                if attempt < self._max_retries - 1:
+                    delay = self._base_delay * (2 ** attempt)
+                    logger.warning("Rate limited, retrying in %.1fs (attempt %d/%d)", delay, attempt + 1, self._max_retries)
+                    await asyncio.sleep(delay)
+                else:
+                    raise
 
     def build_tool_schema(self, tools: list[Any]) -> list[dict]:
         return [

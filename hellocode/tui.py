@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import io
-import os
+import shutil
 import sys
 import asyncio
 from datetime import datetime
@@ -13,16 +13,16 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
-from rich.columns import Columns
-from rich.layout import Layout
-from rich.live import Live
 
 
 def _make_console() -> Console:
     if sys.platform == "win32":
-        stdout_utf8 = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        return Console(file=stdout_utf8, force_terminal=True)
+        try:
+            if hasattr(sys.stdout, "buffer") and sys.stdout.encoding != "utf-8":
+                stdout_utf8 = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+                return Console(file=stdout_utf8, force_terminal=True)
+        except Exception:
+            pass
     return Console(force_terminal=True)
 
 
@@ -38,7 +38,7 @@ class TUI:
 
     def _setup_layout(self):
         try:
-            size = os.get_terminal_size()
+            size = shutil.get_terminal_size()
             self._terminal_height = size.lines
             self._right_width = max(20, size.columns // 5)
             self._left_width = size.columns - self._right_width - 3
@@ -80,7 +80,7 @@ class TUI:
         self._setup_layout()
         self.console.print(f"[bold green]HelloCode v{__version__}[/bold green]")
         self.console.print("[dim]Type /help for commands, /exit to quit[/dim]")
-        print()
+        self.console.print()
 
     def print_welcome(self, session_title: str = "New Session"):
         pass
@@ -209,6 +209,7 @@ class TUI:
 
     def setup_completer(self, tool_names: list[str]):
         try:
+            from prompt_toolkit import PromptSession
             from prompt_toolkit.completion import WordCompleter
             completer = WordCompleter(tool_names, ignore_case=True)
             if self._prompt_session:

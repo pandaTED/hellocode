@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import concurrent.futures
 import importlib
 import logging
 import time
@@ -12,6 +14,10 @@ from typing import Any, Callable
 logger = logging.getLogger("hellocode.plugin")
 
 from .config import Config
+
+_sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="plugin")
+
+atexit.register(lambda: _sync_executor.shutdown(wait=False))
 
 
 class PluginHooks:
@@ -52,10 +58,11 @@ class Plugin:
 
         try:
             if asyncio.iscoroutinefunction(handler):
-                coro = handler(*args, **kwargs)
+                result = await asyncio.wait_for(handler(*args, **kwargs), timeout=5.0)
             else:
-                coro = asyncio.to_thread(handler, *args, **kwargs)
-            result = await asyncio.wait_for(coro, timeout=5.0)
+                loop = asyncio.get_running_loop()
+                future = loop.run_in_executor(_sync_executor, handler, *args, **kwargs)
+                result = await asyncio.wait_for(future, timeout=5.0)
             self._failures = 0
             return result
         except Exception:

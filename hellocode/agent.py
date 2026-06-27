@@ -33,12 +33,17 @@ class AgentLoop:
         self.provider = provider
         self.tools = tools
         self.memory = memory
-        self._running = False
-        self._abort = asyncio.Event()
         self.actor_manager: ActorManager | None = None
+        self._abort_events: dict[str, set[asyncio.Event]] = {}
 
-    def abort(self):
-        self._abort.set()
+    def abort(self, session_id: str | None = None) -> None:
+        if session_id:
+            for evt in list(self._abort_events.get(session_id, ())):
+                evt.set()
+        else:
+            for events in list(self._abort_events.values()):
+                for evt in list(events):
+                    evt.set()
 
     async def run(
         self,
@@ -49,6 +54,31 @@ class AgentLoop:
         on_tool_call: Any = None,
         on_tool_result: Any = None,
         on_message: Any = None,
+    ) -> str:
+        abort = asyncio.Event()
+        self._abort_events.setdefault(session_id, set()).add(abort)
+        try:
+            return await self._run_inner(
+                session_id, user_input, agent_name, workdir,
+                on_tool_call, on_tool_result, on_message, abort,
+            )
+        finally:
+            events = self._abort_events.get(session_id)
+            if events:
+                events.discard(abort)
+                if not events:
+                    self._abort_events.pop(session_id, None)
+
+    async def _run_inner(
+        self,
+        session_id: str,
+        user_input: str,
+        agent_name: str,
+        workdir: Path | None,
+        on_tool_call: Any,
+        on_tool_result: Any,
+        on_message: Any,
+        abort: asyncio.Event,
     ) -> str:
         agent_def = DEFAULT_AGENTS.get(agent_name) or AgentDef(name=agent_name, description="", mode="primary")
         agent_model = self.config.get_provider_model(agent_name)
@@ -73,7 +103,19 @@ class AgentLoop:
 
         # Load previous conversation history from storage
         prev_messages = self.storage.list_messages(session_id, limit=200)
-        for pm in prev_messages:
+        # Truncate to last ~50k chars of content to stay within context limits
+        total_chars = 0
+        MAX_HISTORY_CHARS = 50000
+        trimmed_messages: list[dict] = []
+        for pm in reversed(prev_messages):
+            data = pm.get("data", {})
+            content_len = len(str(data.get("content", "")))
+            if total_chars + content_len > MAX_HISTORY_CHARS and trimmed_messages:
+                break
+            total_chars += content_len
+            trimmed_messages.append(pm)
+        trimmed_messages.reverse()
+        for pm in trimmed_messages:
             data = pm.get("data", {})
             role = data.get("role", "")
             if not role:
@@ -100,27 +142,25 @@ class AgentLoop:
                     messages.append({"role": "user", "content": content})
 
         messages.append({"role": "user", "content": user_input})
+        self.storage.create_message(session_id, agent_name, {
+            "role": "user", "content": user_input,
+        })
         logger.debug("Agent %s starting, %d history messages loaded", agent_name, len(messages) - 1)
 
         tool_schemas = self.provider.build_tool_schema(
             self.tools.filter_by_allowlist(agent_def.tool_allowlist)
         )
 
-        self._running = True
-        self._abort.clear()
         max_iterations = 50
         iteration = 0
-        nudge_added = False
 
-        while self._running and not self._abort.is_set():
+        if self.storage.has_open_tasks(session_id):
+            messages.append({"role": "system", "content": "[TASK NUDGE] You have open tasks. Continue working on them."})
+
+        while not abort.is_set():
             iteration += 1
             if iteration > max_iterations:
                 break
-
-            if not nudge_added and self.storage.has_open_tasks(session_id):
-                nudge = "[TASK NUDGE] You have open tasks. Continue working on them."
-                messages.append({"role": "user", "content": nudge})
-                nudge_added = True
 
             try:
                 # Use streaming to display tokens in real-time
@@ -166,6 +206,7 @@ class AgentLoop:
             if not tool_calls:
                 break
 
+            needs_user_input = False
             for tc in tool_calls:
                 fn_name = tc["function"]["name"]
                 logger.info("Tool call: %s", fn_name)
@@ -185,8 +226,11 @@ class AgentLoop:
                     try:
                         result = await tool.execute(fn_args, ctx)
                         tool_result = result.output
+                        if result.metadata.get("needs_user_input"):
+                            needs_user_input = True
+                        tool_success = bool(result.metadata.get("success", True))
                         if on_tool_result:
-                            await on_tool_result(fn_name, tool_result, True)
+                            await on_tool_result(fn_name, tool_result, tool_success)
                     except Exception as e:
                         tool_result = f"Tool error: {e}"
                         if on_tool_result:
@@ -202,7 +246,8 @@ class AgentLoop:
                     "role": "tool", "tool_call_id": tc["id"], "content": tool_result,
                 })
 
-        self._running = False
+            if needs_user_input:
+                break
 
         # Notify agent finished
         if on_message:
@@ -261,6 +306,10 @@ class ActorManager:
         self.memory = memory
         self.config = config
         self._actors: dict[str, asyncio.Task] = {}
+        self._loop: AgentLoop | None = None
+
+    def set_loop(self, loop: AgentLoop) -> None:
+        self._loop = loop
 
     async def spawn(
         self,
@@ -288,12 +337,14 @@ class ActorManager:
             name=agent_type, description=description, mode="subagent"
         )
 
-        loop = AgentLoop(self.config, self.storage, self.provider, self.tools, self.memory)
+        if not self._loop:
+            raise RuntimeError("ActorManager.set_loop() must be called before spawn()")
+        agent_loop = self._loop
 
         async def _run_actor():
             self.storage.update_actor(session_id, actor_id, status="running")
             try:
-                result = await loop.run(
+                result = await agent_loop.run(
                     session_id=session_id,
                     user_input=prompt,
                     agent_name=agent_type,
@@ -321,7 +372,7 @@ class ActorManager:
             return None
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
         actor = self.storage.get_actor(session_id, actor_id)
         return actor

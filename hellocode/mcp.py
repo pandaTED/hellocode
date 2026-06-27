@@ -35,8 +35,16 @@ class MCPClient:
         self._connections: dict[str, Any] = {}
         self._status: dict[str, str] = {}
         self._request_id = 0
+        self._lock: asyncio.Lock | None = None
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def connect_all(self) -> list[Tool]:
+        self._owner_loop = asyncio.get_running_loop()
         tools: list[Tool] = []
         for name, server_cfg in self.config.mcp.servers.items():
             try:
@@ -59,12 +67,19 @@ class MCPClient:
         env = cfg.get("env", {})
 
         try:
+            import os
+            safe_env = {k: v for k, v in os.environ.items() if k in (
+                "PATH", "HOME", "USER", "LANG", "LC_ALL", "TEMP", "TMP",
+                "SYSTEMROOT", "WINDIR", "COMSPEC",
+            )}
+            safe_env.update(env)
+
             proc = await asyncio.create_subprocess_exec(
                 cmd, *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**dict(__import__("os").environ), **env},
+                env=safe_env,
             )
             self._connections[name] = {"process": proc, "transport": "stdio"}
             self._status[name] = "connected"
@@ -112,18 +127,32 @@ class MCPClient:
             return []
 
     async def call_tool(self, server: str, tool_name: str, arguments: dict) -> Any:
+        owner_loop = self._owner_loop
+        current_loop = asyncio.get_running_loop()
+        if owner_loop and owner_loop is not current_loop and owner_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self._call_tool_local(server, tool_name, arguments),
+                owner_loop,
+            )
+            return await asyncio.wrap_future(future)
+        return await self._call_tool_local(server, tool_name, arguments)
+
+    async def _call_tool_local(self, server: str, tool_name: str, arguments: dict) -> Any:
         conn = self._connections.get(server)
         if not conn:
             return {"error": f"Server {server} not connected"}
 
-        self._request_id += 1
-        await self._send_json(server, {
-            "jsonrpc": "2.0",
-            "id": self._request_id,
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments},
-        })
-        resp = await self._recv_json(server)
+        async with self._get_lock():
+            self._request_id += 1
+            req_id = self._request_id
+
+            await self._send_json(server, {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments},
+            })
+            resp = await self._recv_json(server)
         result = resp.get("result", {})
         content = result.get("content", [])
         texts = [c.get("text", "") for c in content if c.get("type") == "text"]
@@ -156,6 +185,13 @@ class MCPClient:
         for name, conn in self._connections.items():
             proc = conn.get("process")
             if proc:
-                proc.terminate()
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except (ProcessLookupError, asyncio.TimeoutError):
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
         self._connections.clear()
         self._status.clear()

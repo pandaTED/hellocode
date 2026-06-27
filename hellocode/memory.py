@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ class MemorySystem:
         (self.data_dir / "global").mkdir(exist_ok=True)
         (self.data_dir / "projects").mkdir(exist_ok=True)
         (self.data_dir / "sessions").mkdir(exist_ok=True)
-        self._fingerprints: dict[str, str] = {}
+        self._fingerprints: dict[str, str] = self.storage.load_memory_fingerprints()
         self._last_reindex: float = 0
 
     def get_project_memory_path(self, project_id: str) -> Path:
@@ -69,7 +69,10 @@ class MemorySystem:
         ]:
             for fp in self.data_dir.glob(pattern):
                 rel = str(fp.relative_to(self.data_dir))
-                stat = fp.stat()
+                try:
+                    stat = fp.stat()
+                except OSError:
+                    continue
                 fingerprint = f"{stat.st_size}-{int(stat.st_mtime * 1000)}"
                 stored = self._fingerprints.get(rel)
                 if stored == fingerprint:
@@ -77,7 +80,10 @@ class MemorySystem:
                 parts = fp.relative_to(self.data_dir).parts
                 scope_id = parts[1] if len(parts) > 1 else ""
                 mtype = fp.stem.lower()
-                body = fp.read_text(encoding="utf-8", errors="replace")
+                try:
+                    body = fp.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
                 self.storage.index_memory(rel, scope, scope_id, mtype, body, fingerprint)
                 self._fingerprints[rel] = fingerprint
                 count += 1
@@ -89,7 +95,6 @@ class MemorySystem:
         return count
 
     def search(self, query: str, scope: str | None = None, scope_id: str | None = None, mtype: str | None = None, limit: int = 10) -> list[dict]:
-        import time
         now = time.time()
         # Reindex at most once every 5 seconds
         if now - self._last_reindex > 5:

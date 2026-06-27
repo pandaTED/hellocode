@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import logging
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .base import ExecuteResult, Tool, ToolContext, _truncate
 
 MAX_OUTPUT = 51200
+logger = logging.getLogger("hellocode.tools")
 
 
 class ReadTool(Tool):
@@ -33,6 +35,8 @@ class ReadTool(Tool):
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
         import aiofiles
         fp = Path(args["filePath"])
+        if not fp.is_absolute():
+            fp = ctx.workdir / fp
         if not fp.exists():
             return ExecuteResult(title="Error", output=f"Path not found: {fp}")
         if fp.is_dir():
@@ -72,6 +76,8 @@ class WriteTool(Tool):
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
         import aiofiles
         fp = Path(args["filePath"])
+        if not fp.is_absolute():
+            fp = ctx.workdir / fp
         fp.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(fp, "w", encoding="utf-8") as f:
             await f.write(args["content"])
@@ -97,6 +103,8 @@ class EditTool(Tool):
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
         import aiofiles
         fp = Path(args["filePath"])
+        if not fp.is_absolute():
+            fp = ctx.workdir / fp
         if not fp.exists():
             return ExecuteResult(title="Error", output=f"File not found: {fp}")
         async with aiofiles.open(fp, encoding="utf-8") as f:
@@ -160,10 +168,41 @@ class GrepTool(Tool):
         }
 
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
-        import aiofiles
-        pattern = re.compile(args["pattern"])
+        pattern = args["pattern"]
         base = Path(args.get("path") or ctx.workdir)
         include = args.get("include")
+
+        # Try system rg/grep first for performance
+        for cmd_name in ("rg", "grep"):
+            try:
+                if cmd_name == "rg":
+                    cmd_args = [cmd_name, "-n", "--max-count=100", "--no-heading"]
+                    if include:
+                        cmd_args += ["--glob", include]
+                else:
+                    cmd_args = [cmd_name, "-n", "-r", "-m", "100"]
+                    if include:
+                        cmd_args += ["--include", include]
+                cmd_args += [pattern, str(base)]
+
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd_args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+                if proc.returncode in (0, 1):
+                    output = stdout.decode("utf-8", errors="replace").strip()
+                    if output:
+                        lines = output.splitlines()[:100]
+                        return ExecuteResult(title="Grep results", output=_truncate("\n".join(lines)))
+                break
+            except (FileNotFoundError, asyncio.TimeoutError):
+                continue
+
+        # Fallback to Python implementation
+        import aiofiles
+        compiled = re.compile(pattern)
         results: list[str] = []
         try:
             for p in base.rglob("*"):
@@ -177,7 +216,7 @@ class GrepTool(Tool):
                 except Exception:
                     continue
                 for i, line in enumerate(text.splitlines(), 1):
-                    if pattern.search(line):
+                    if compiled.search(line):
                         rel = p.relative_to(base)
                         results.append(f"{rel}:{i}: {line.rstrip()}")
                         if len(results) >= 100:
@@ -208,6 +247,7 @@ class BashTool(Tool):
         cmd = args["command"]
         timeout = (args.get("timeout") or 120000) / 1000
         cwd = args.get("workdir") or str(ctx.workdir)
+        logger.info("Bash [%s]: %s", cwd, cmd[:200])
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
@@ -254,6 +294,13 @@ class WebfetchTool(Tool):
     id = "webfetch"
     description = "Fetch content from a URL."
 
+    _BLOCKED_SCHEMES = frozenset({"file", "ftp", "data", "javascript"})
+    _PRIVATE_IP_PREFIXES = ("10.", "127.", "172.16.", "172.17.", "172.18.", "172.19.",
+                            "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+                            "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+                            "192.168.", "169.254.")
+    _LOCAL_HOSTNAMES = frozenset({"localhost", "0.0.0.0", "::1", ""})
+
     def parameters_schema(self) -> dict:
         return {
             "type": "object",
@@ -264,16 +311,54 @@ class WebfetchTool(Tool):
             "required": ["url", "format"],
         }
 
+    @classmethod
+    def _is_safe_url(cls, url: str) -> str | None:
+        import ipaddress
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return "Invalid URL"
+        if parsed.scheme.lower() in cls._BLOCKED_SCHEMES:
+            return f"Scheme '{parsed.scheme}' is not allowed"
+        if parsed.scheme.lower() not in ("http", "https"):
+            return f"Only http/https URLs are allowed"
+        hostname = parsed.hostname or ""
+        if hostname.lower() in cls._LOCAL_HOSTNAMES:
+            return "localhost is not allowed"
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            return None
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            return "Private or local network addresses are not allowed"
+        return None
+
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
         import aiohttp
         url = args["url"]
+        safety_error = self._is_safe_url(url)
+        if safety_error:
+            return ExecuteResult(title="Error", output=safety_error, metadata={"success": False})
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     body = await resp.text()
+                    if resp.status >= 400:
+                        return ExecuteResult(
+                            title=f"HTTP {resp.status}",
+                            output=_truncate(body),
+                            metadata={"success": False, "status": resp.status},
+                        )
                     return ExecuteResult(title=f"Fetched {url}", output=_truncate(body))
         except Exception as e:
-            return ExecuteResult(title="Error", output=str(e))
+            return ExecuteResult(title="Error", output=str(e), metadata={"success": False})
 
 
 class QuestionTool(Tool):
@@ -515,10 +600,10 @@ class WorkflowTool(Tool):
                 )
                 return ExecuteResult(title="Workflow", output=json.dumps(result, default=str, ensure_ascii=False))
             elif action == "status":
-                row = ctx.storage.conn.execute(
+                row = ctx.storage._execute_one(
                     "SELECT * FROM workflow_run WHERE id=?", (args["run_id"],)
-                ).fetchone()
-                result = dict(row) if row else {"error": "Run not found"}
+                )
+                result = row if row else {"error": "Run not found"}
                 return ExecuteResult(title="Workflow", output=json.dumps(result, default=str, ensure_ascii=False))
             else:
                 return ExecuteResult(title="Workflow", output=json.dumps({"error": f"Action {action} not implemented"}))
@@ -541,11 +626,29 @@ class SkillTool(Tool):
 
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
         name = args["name"]
+        candidates = [name]
+        if ":" in name:
+            candidates.append(name.split(":", 1)[1])
         search_paths = [
             Path.home() / ".codex" / "skills" / name / "SKILL.md",
+            Path.home() / ".codex" / "skills" / ".system" / name / "SKILL.md",
             ctx.workdir / ".codex" / "skills" / name / "SKILL.md",
             Path.home() / ".config" / "hellocode" / "skills" / name / "SKILL.md",
         ]
+        seen: set[Path] = set(search_paths)
+        for base in (
+            Path.home() / ".codex" / "skills",
+            Path.home() / ".codex" / "plugins" / "cache",
+        ):
+            if not base.exists():
+                continue
+            try:
+                for skill_file in base.rglob("SKILL.md"):
+                    if skill_file.parent.name in candidates and skill_file not in seen:
+                        search_paths.append(skill_file)
+                        seen.add(skill_file)
+            except OSError:
+                continue
         for p in search_paths:
             if p.exists():
                 content = p.read_text(encoding="utf-8", errors="replace")
@@ -571,12 +674,18 @@ class NotebookEditTool(Tool):
 
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
         fp = Path(args["notebook_path"])
+        if not fp.is_absolute():
+            fp = ctx.workdir / fp
         if not fp.exists():
             return ExecuteResult(title="Error", output=f"Notebook not found: {fp}")
         try:
             nb = json.loads(fp.read_text(encoding="utf-8"))
-            cell_idx = int(args.get("notebook_id") or len(nb.get("cells", [])) - 1)
             cells = nb.get("cells", [])
+            cell_id = args.get("notebook_id")
+            if cell_id is not None:
+                cell_idx = int(cell_id)
+            else:
+                cell_idx = len(cells) - 1
             if 0 <= cell_idx < len(cells):
                 cells[cell_idx]["source"] = args["new_source"].splitlines(keepends=True)
             else:
@@ -609,86 +718,47 @@ class ApplyPatchTool(Tool):
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
         patch_content = args["patch"]
         try:
-            import difflib
-            from pathlib import Path
-            
-            # 解析 patch 文件
-            patch_lines = patch_content.splitlines()
-            files_to_patch = {}
-            current_file = None
-            current_diff = []
-            
-            for line in patch_lines:
-                if line.startswith('diff --git'):
-                    if current_file and current_diff:
-                        files_to_patch[current_file] = current_diff
-                    # 提取文件名
-                    parts = line.split(' ')
-                    if len(parts) >= 3:
-                        current_file = parts[2].lstrip('a/').lstrip('b/')
-                    else:
-                        current_file = "unknown"
-                    current_diff = [line]
-                elif line.startswith('---') or line.startswith('+++'):
-                    if current_file:
-                        current_diff.append(line)
-                elif current_file:
-                    current_diff.append(line)
-            
-            if current_file and current_diff:
-                files_to_patch[current_file] = current_diff
-            
-            if not files_to_patch:
-                return ExecuteResult(title="Error", output="No valid patch content found")
-            
-            # 应用补丁
-            import asyncio
-            results = []
-            for file_path, diff_lines in files_to_patch.items():
-                full_path = ctx.workdir / file_path
-                if not full_path.exists():
-                    results.append(f"Warning: {file_path} not found, skipping")
-                    continue
-                
-                try:
-                    # Dry run first
-                    proc = await asyncio.create_subprocess_exec(
-                        'patch', '-p1', '--dry-run',
-                        stdin=asyncio.subprocess.PIPE,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=str(ctx.workdir),
-                    )
-                    _, stderr = await asyncio.wait_for(
-                        proc.communicate(input=patch_content.encode()),
-                        timeout=10
-                    )
-                    
-                    if proc.returncode == 0:
-                        # Actually apply
-                        proc = await asyncio.create_subprocess_exec(
-                            'patch', '-p1',
-                            stdin=asyncio.subprocess.PIPE,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                            cwd=str(ctx.workdir),
-                        )
-                        _, stderr = await asyncio.wait_for(
-                            proc.communicate(input=patch_content.encode()),
-                            timeout=10
-                        )
-                        if proc.returncode == 0:
-                            results.append(f"Successfully patched {file_path}")
-                        else:
-                            results.append(f"Failed to patch {file_path}: {stderr.decode()}")
-                    else:
-                        results.append(f"Patch would fail for {file_path}: {stderr.decode()}")
-                        
-                except asyncio.TimeoutError:
-                    results.append(f"Timeout applying patch to {file_path}")
-                except Exception as e:
-                    results.append(f"Error patching {file_path}: {str(e)}")
-            
-            return ExecuteResult(title="Apply Patch", output="\n".join(results))
+            # Dry run first
+            proc = await asyncio.create_subprocess_exec(
+                'patch', '-p1', '--dry-run',
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(ctx.workdir),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=patch_content.encode()),
+                timeout=10
+            )
+
+            if proc.returncode != 0:
+                return ExecuteResult(
+                    title="Patch Dry-run Failed",
+                    output=stderr.decode(errors="replace") or stdout.decode(errors="replace"),
+                )
+
+            # Actually apply
+            proc = await asyncio.create_subprocess_exec(
+                'patch', '-p1',
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(ctx.workdir),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=patch_content.encode()),
+                timeout=10
+            )
+
+            output = stdout.decode(errors="replace")
+            err = stderr.decode(errors="replace")
+            if proc.returncode == 0:
+                return ExecuteResult(title="Apply Patch", output=output or "Patch applied successfully")
+            else:
+                return ExecuteResult(title="Apply Patch Error", output=f"Exit code: {proc.returncode}\n{output}\n{err}")
+        except asyncio.TimeoutError:
+            return ExecuteResult(title="Apply Patch Error", output="Command timed out after 10s")
+        except FileNotFoundError:
+            return ExecuteResult(title="Apply Patch Error", output="'patch' command not found. Install patch or use Git Bash.")
         except Exception as e:
             return ExecuteResult(title="Apply Patch Error", output=str(e))
