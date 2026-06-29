@@ -23,7 +23,10 @@ class LLMProvider:
         headers = config.get_provider_headers()
         if headers:
             kwargs["default_headers"] = headers
-        api_key = config.get_provider_key() or "sk-placeholder"
+        api_key = config.get_provider_key()
+        if not api_key:
+            logger.warning("No API key configured. LLM calls will fail.")
+            api_key = "sk-placeholder"
         self.client = AsyncOpenAI(api_key=api_key, **kwargs)
         self._max_retries = 3
         self._base_delay = 2.0
@@ -91,33 +94,36 @@ class LLMProvider:
     async def _stream(self, kwargs: dict) -> AsyncIterator[dict[str, Any]]:
         stream = await self.client.chat.completions.create(**kwargs, stream=True)
         tool_calls: dict[int, dict[str, Any]] = {}
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if not delta:
-                continue
-            if delta.content:
-                yield {"type": "content", "content": delta.content}
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    if tc.index is None:
-                        continue
-                    current = tool_calls.setdefault(
-                        tc.index,
-                        {
-                            "id": "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        },
-                    )
-                    if tc.id:
-                        current["id"] = tc.id
-                    if tc.function:
-                        if tc.function.name:
-                            current["function"]["name"] = tc.function.name
-                        if tc.function.arguments:
-                            current["function"]["arguments"] += tc.function.arguments
+        try:
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if not delta:
+                    continue
+                if delta.content:
+                    yield {"type": "content", "content": delta.content}
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        if tc.index is None:
+                            continue
+                        current = tool_calls.setdefault(
+                            tc.index,
+                            {
+                                "id": "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            },
+                        )
+                        if tc.id:
+                            current["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                current["function"]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                current["function"]["arguments"] += tc.function.arguments
+        finally:
+            await stream.close()
         for idx in sorted(tool_calls):
             yield {"type": "tool_call", "tool_call": tool_calls[idx]}
 

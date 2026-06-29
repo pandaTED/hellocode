@@ -5,14 +5,14 @@ from .builtin import (
     ReadTool, WriteTool, EditTool, GlobTool, GrepTool,
     BashTool, ChangeDirectoryTool, WebfetchTool, QuestionTool,
     TaskTool, ActorTool, MemoryTool, WorkflowTool, SkillTool,
-    NotebookEditTool, ApplyPatchTool,
+    NotebookEditTool, ApplyPatchTool, KnowledgeTool, ScheduleTool,
 )
 
 ALL_TOOLS = [
     ReadTool(), WriteTool(), EditTool(), GlobTool(), GrepTool(),
     BashTool(), ChangeDirectoryTool(), WebfetchTool(), QuestionTool(),
     TaskTool(), ActorTool(), MemoryTool(), WorkflowTool(), SkillTool(),
-    NotebookEditTool(), ApplyPatchTool(),
+    NotebookEditTool(), ApplyPatchTool(), KnowledgeTool(), ScheduleTool(),
 ]
 
 

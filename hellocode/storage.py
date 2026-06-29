@@ -170,6 +170,78 @@ CREATE TABLE IF NOT EXISTS event (
   type TEXT,
   data TEXT
 );
+
+CREATE TABLE IF NOT EXISTS kb_source (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL DEFAULT 'folder',
+  status TEXT NOT NULL DEFAULT 'active',
+  file_count INTEGER DEFAULT 0,
+  last_indexed_at REAL,
+  time_created REAL,
+  time_updated REAL
+);
+
+CREATE TABLE IF NOT EXISTS kb_document (
+  id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  file_type TEXT NOT NULL,
+  file_size INTEGER,
+  content_hash TEXT,
+  extracted_text TEXT,
+  metadata TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error_message TEXT,
+  time_created REAL,
+  time_updated REAL,
+  FOREIGN KEY (source_id) REFERENCES kb_source(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS kb_chunk (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  page_number INTEGER,
+  heading TEXT,
+  char_offset INTEGER,
+  time_created REAL,
+  FOREIGN KEY (document_id) REFERENCES kb_document(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS schedule (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  task_type TEXT NOT NULL,
+  cron_expression TEXT,
+  interval_seconds INTEGER,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  payload TEXT NOT NULL,
+  agent_name TEXT DEFAULT 'build',
+  session_id TEXT,
+  workdir TEXT,
+  last_run_at REAL,
+  last_status TEXT,
+  last_error TEXT,
+  next_run_at REAL,
+  time_created REAL,
+  time_updated REAL
+);
+
+CREATE TABLE IF NOT EXISTS schedule_run (
+  id TEXT PRIMARY KEY,
+  schedule_id TEXT NOT NULL,
+  started_at REAL,
+  finished_at REAL,
+  status TEXT NOT NULL,
+  result TEXT,
+  error_message TEXT,
+  FOREIGN KEY (schedule_id) REFERENCES schedule(id) ON DELETE CASCADE
+);
 """
 
 FTS_SCHEMA = """
@@ -202,6 +274,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(
   tool_name,
   body,
   time_created
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunk_fts USING fts5(
+  content,
+  heading,
+  content=kb_chunk,
+  content_rowid=rowid
 );
 """
 
@@ -712,6 +791,12 @@ class Storage:
         except sqlite3.OperationalError:
             return {}
 
+    @staticmethod
+    def _sanitize_fts5_token(token: str) -> str:
+        special = set('"*():+^~{}/-')
+        cleaned = "".join(c for c in token if c not in special)
+        return cleaned if cleaned else ""
+
     def search_memory(
         self,
         query: str,
@@ -720,7 +805,8 @@ class Storage:
         mtype: str | None = None,
         limit: int = 10,
     ) -> list[dict]:
-        terms = [t for t in query.split() if t.strip()]
+        terms = [self._sanitize_fts5_token(t) for t in query.split()]
+        terms = [t for t in terms if t]
         if not terms:
             return []
         fts_query = " OR ".join(terms)
@@ -793,7 +879,8 @@ class Storage:
             pass
 
     def search_history(self, query: str, session_id: str | None = None, limit: int = 20) -> list[dict]:
-        terms = [t for t in query.split() if t.strip()]
+        terms = [self._sanitize_fts5_token(t) for t in query.split()]
+        terms = [t for t in terms if t]
         if not terms:
             return []
         fts_query = " OR ".join(terms)
@@ -804,6 +891,316 @@ class Storage:
             sql = "SELECT * FROM history_fts WHERE history_fts MATCH ? ORDER BY rank LIMIT ?"
             rows = self._execute(sql, (fts_query, limit))
         return [dict(r) for r in rows]
+
+    # ── Knowledge Base ──
+
+    def create_kb_source(self, id: str, name: str, path: str, source_type: str = "folder") -> dict:
+        now = self.now()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO kb_source (id, name, path, type, status, file_count, time_created, time_updated) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (id, name, path, source_type, "active", 0, now, now),
+            )
+            self.conn.commit()
+        return {"id": id, "name": name, "path": path, "type": source_type, "status": "active"}
+
+    def get_kb_source(self, source_id: str) -> dict | None:
+        return self._execute_one("SELECT * FROM kb_source WHERE id=?", (source_id,))
+
+    def get_kb_source_by_path(self, path: str) -> dict | None:
+        return self._execute_one("SELECT * FROM kb_source WHERE path=?", (path,))
+
+    def list_kb_sources(self) -> list[dict]:
+        return self._execute("SELECT * FROM kb_source ORDER BY time_created")
+
+    def update_kb_source(self, source_id: str, **kwargs) -> None:
+        allowed = {"name", "status", "file_count", "last_indexed_at"}
+        sets, vals = [], []
+        for k, v in kwargs.items():
+            if k in allowed:
+                sets.append(f"{k}=?")
+                vals.append(v)
+        if not sets:
+            return
+        sets.append("time_updated=?")
+        vals.append(self.now())
+        vals.append(source_id)
+        with self._lock:
+            self.conn.execute(f"UPDATE kb_source SET {', '.join(sets)} WHERE id=?", vals)
+            self.conn.commit()
+
+    def delete_kb_source(self, source_id: str) -> None:
+        with self._lock:
+            doc_ids = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM kb_document WHERE source_id=?", (source_id,)
+            ).fetchall()]
+            for doc_id in doc_ids:
+                self._delete_kb_chunks_for_doc(doc_id)
+                self.conn.execute("DELETE FROM kb_document WHERE id=?", (doc_id,))
+            self.conn.execute("DELETE FROM kb_source WHERE id=?", (source_id,))
+            self.conn.commit()
+
+    def create_kb_document(self, id: str, source_id: str, file_path: str, file_name: str,
+                           file_type: str, file_size: int, content_hash: str) -> dict:
+        now = self.now()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO kb_document (id, source_id, file_path, file_name, file_type, "
+                "file_size, content_hash, status, time_created, time_updated) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (id, source_id, file_path, file_name, file_type, file_size, content_hash, "pending", now, now),
+            )
+            self.conn.commit()
+        return {"id": id, "source_id": source_id, "file_path": file_path, "status": "pending"}
+
+    def get_kb_document(self, doc_id: str) -> dict | None:
+        return self._execute_one("SELECT * FROM kb_document WHERE id=?", (doc_id,))
+
+    def get_kb_document_by_path(self, file_path: str) -> dict | None:
+        return self._execute_one("SELECT * FROM kb_document WHERE file_path=?", (file_path,))
+
+    def list_kb_documents(self, source_id: str | None = None) -> list[dict]:
+        if source_id:
+            return self._execute(
+                "SELECT * FROM kb_document WHERE source_id=? ORDER BY file_name", (source_id,)
+            )
+        return self._execute("SELECT * FROM kb_document ORDER BY file_name")
+
+    def update_kb_document(self, doc_id: str, **kwargs) -> None:
+        allowed = {"extracted_text", "metadata", "status", "error_message", "content_hash"}
+        sets, vals = [], []
+        for k, v in kwargs.items():
+            if k in allowed:
+                sets.append(f"{k}=?")
+                vals.append(v)
+        if not sets:
+            return
+        sets.append("time_updated=?")
+        vals.append(self.now())
+        vals.append(doc_id)
+        with self._lock:
+            self.conn.execute(f"UPDATE kb_document SET {', '.join(sets)} WHERE id=?", vals)
+            self.conn.commit()
+
+    def delete_kb_document(self, doc_id: str) -> None:
+        with self._lock:
+            self._delete_kb_chunks_for_doc(doc_id)
+            self.conn.execute("DELETE FROM kb_document WHERE id=?", (doc_id,))
+            self.conn.commit()
+
+    def _delete_kb_chunks_for_doc(self, doc_id: str) -> None:
+        self.conn.execute("DELETE FROM kb_chunk WHERE document_id=?", (doc_id,))
+        try:
+            self.conn.execute("INSERT INTO kb_chunk_fts(kb_chunk_fts) VALUES('rebuild')")
+        except sqlite3.OperationalError:
+            pass
+
+    def create_kb_chunk(self, id: str, document_id: str, chunk_index: int, content: str,
+                        page_number: int | None = None, heading: str | None = None,
+                        char_offset: int | None = None) -> dict:
+        now = self.now()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO kb_chunk (id, document_id, chunk_index, content, page_number, heading, char_offset, time_created) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (id, document_id, chunk_index, content, page_number, heading, char_offset, now),
+            )
+            self.conn.commit()
+        return {"id": id, "document_id": document_id, "chunk_index": chunk_index}
+
+    def create_kb_chunks_batch(self, chunks: list[dict]) -> None:
+        if not chunks:
+            return
+        now = self.now()
+        with self._lock:
+            self.conn.executemany(
+                "INSERT INTO kb_chunk (id, document_id, chunk_index, content, page_number, heading, char_offset, time_created) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                [(c["id"], c["document_id"], c["chunk_index"], c["content"],
+                  c.get("page_number"), c.get("heading"), c.get("char_offset"), now) for c in chunks],
+            )
+            self.conn.commit()
+
+    def index_kb_chunks_fts_batch(self, entries: list[tuple[str, str, str]]) -> None:
+        if not entries:
+            return
+        try:
+            with self._lock:
+                for chunk_id, content, heading in entries:
+                    row = self.conn.execute(
+                        "SELECT rowid FROM kb_chunk WHERE id=?", (chunk_id,)
+                    ).fetchone()
+                    if row:
+                        self.conn.execute(
+                            "INSERT INTO kb_chunk_fts (rowid, content, heading) VALUES (?,?,?)",
+                            (row["rowid"], content, heading or ""),
+                        )
+                self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def index_kb_chunk_fts(self, chunk_id: str, content: str, heading: str) -> None:
+        try:
+            with self._lock:
+                row = self.conn.execute(
+                    "SELECT rowid FROM kb_chunk WHERE id=?", (chunk_id,)
+                ).fetchone()
+                if row:
+                    self.conn.execute(
+                        "INSERT INTO kb_chunk_fts (rowid, content, heading) VALUES (?,?,?)",
+                        (row["rowid"], content, heading or ""),
+                    )
+                    self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def rebuild_kb_chunk_fts(self) -> None:
+        with self._lock:
+            try:
+                self.conn.execute("INSERT INTO kb_chunk_fts(kb_chunk_fts) VALUES('rebuild')")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+    def search_kb_chunks(self, query: str, source_id: str | None = None,
+                         file_type: str | None = None, limit: int = 10) -> list[dict]:
+        terms = [self._sanitize_fts5_token(t) for t in query.split()]
+        terms = [t for t in terms if t]
+        if not terms:
+            return []
+        fts_query = " OR ".join(terms)
+        where_parts = []
+        params: list[Any] = []
+        if source_id:
+            where_parts.append("d.source_id=?")
+            params.append(source_id)
+        if file_type:
+            where_parts.append("d.file_type=?")
+            params.append(file_type)
+        where = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+        sql = f"""
+            SELECT c.id, c.document_id, c.chunk_index, c.content, c.page_number, c.heading,
+                   c.char_offset, d.file_path, d.file_name, d.file_type, s.name as source_name,
+                   kcf.rank AS score
+            FROM kb_chunk_fts kcf
+            JOIN kb_chunk c ON c.rowid = kcf.rowid
+            JOIN kb_document d ON d.id = c.document_id
+            JOIN kb_source s ON s.id = d.source_id
+            WHERE kb_chunk_fts MATCH ? {where}
+            ORDER BY kcf.rank
+            LIMIT ?
+        """
+        params = [fts_query] + params + [limit]
+        try:
+            rows = self._execute(sql, params)
+        except sqlite3.DatabaseError:
+            self.rebuild_kb_chunk_fts()
+            try:
+                rows = self._execute(sql, params)
+            except sqlite3.DatabaseError:
+                return []
+        return rows
+
+    def get_kb_stats(self) -> dict:
+        sources = self._execute_one("SELECT COUNT(*) as cnt FROM kb_source")
+        documents = self._execute_one("SELECT COUNT(*) as cnt FROM kb_document")
+        chunks = self._execute_one("SELECT COUNT(*) as cnt FROM kb_chunk")
+        indexed = self._execute_one("SELECT COUNT(*) as cnt FROM kb_document WHERE status='indexed'")
+        return {
+            "sources": sources["cnt"] if sources else 0,
+            "documents": documents["cnt"] if documents else 0,
+            "chunks": chunks["cnt"] if chunks else 0,
+            "indexed_documents": indexed["cnt"] if indexed else 0,
+        }
+
+    # ── Schedule ──
+
+    def create_schedule(self, id: str, name: str, task_type: str, payload: str,
+                        cron_expression: str | None = None, interval_seconds: int | None = None,
+                        agent_name: str = "build", session_id: str | None = None,
+                        workdir: str | None = None, description: str | None = None,
+                        next_run_at: float | None = None) -> dict:
+        now = self.now()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO schedule (id, name, description, task_type, cron_expression, "
+                "interval_seconds, enabled, payload, agent_name, session_id, workdir, "
+                "next_run_at, time_created, time_updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (id, name, description, task_type, cron_expression, interval_seconds,
+                 1, payload, agent_name, session_id, workdir, next_run_at, now, now),
+            )
+            self.conn.commit()
+        return {"id": id, "name": name, "task_type": task_type, "enabled": True}
+
+    def get_schedule(self, schedule_id: str) -> dict | None:
+        return self._execute_one("SELECT * FROM schedule WHERE id=?", (schedule_id,))
+
+    def list_schedules(self, enabled_only: bool = False) -> list[dict]:
+        if enabled_only:
+            return self._execute("SELECT * FROM schedule WHERE enabled=1 ORDER BY time_created")
+        return self._execute("SELECT * FROM schedule ORDER BY time_created")
+
+    def update_schedule(self, schedule_id: str, **kwargs) -> None:
+        allowed = {"name", "description", "task_type", "cron_expression", "interval_seconds",
+                    "enabled", "payload", "agent_name", "session_id", "workdir",
+                    "last_run_at", "last_status", "last_error", "next_run_at"}
+        sets, vals = [], []
+        for k, v in kwargs.items():
+            if k in allowed:
+                sets.append(f"{k}=?")
+                vals.append(v)
+        if not sets:
+            return
+        sets.append("time_updated=?")
+        vals.append(self.now())
+        vals.append(schedule_id)
+        with self._lock:
+            self.conn.execute(f"UPDATE schedule SET {', '.join(sets)} WHERE id=?", vals)
+            self.conn.commit()
+
+    def delete_schedule(self, schedule_id: str) -> None:
+        with self._lock:
+            self.conn.execute("DELETE FROM schedule_run WHERE schedule_id=?", (schedule_id,))
+            self.conn.execute("DELETE FROM schedule WHERE id=?", (schedule_id,))
+            self.conn.commit()
+
+    def get_due_schedules(self) -> list[dict]:
+        now = self.now()
+        return self._execute(
+            "SELECT * FROM schedule WHERE enabled=1 AND (next_run_at IS NULL OR next_run_at<=?)",
+            (now,),
+        )
+
+    def create_schedule_run(self, id: str, schedule_id: str) -> dict:
+        now = self.now()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO schedule_run (id, schedule_id, started_at, status) VALUES (?,?,?,?)",
+                (id, schedule_id, now, "running"),
+            )
+            self.conn.commit()
+        return {"id": id, "schedule_id": schedule_id, "status": "running"}
+
+    def update_schedule_run(self, run_id: str, **kwargs) -> None:
+        allowed = {"finished_at", "status", "result", "error_message"}
+        sets, vals = [], []
+        for k, v in kwargs.items():
+            if k in allowed:
+                sets.append(f"{k}=?")
+                vals.append(v)
+        if not sets:
+            return
+        vals.append(run_id)
+        with self._lock:
+            self.conn.execute(f"UPDATE schedule_run SET {', '.join(sets)} WHERE id=?", vals)
+            self.conn.commit()
+
+    def get_schedule_runs(self, schedule_id: str, limit: int = 20) -> list[dict]:
+        return self._execute(
+            "SELECT * FROM schedule_run WHERE schedule_id=? ORDER BY started_at DESC LIMIT ?",
+            (schedule_id, limit),
+        )
 
     # ── Event Sourcing ──
 

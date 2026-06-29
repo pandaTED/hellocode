@@ -235,6 +235,7 @@ def launch_gui(args: argparse.Namespace):
     """Launch the PySide6 GUI."""
     try:
         from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QTimer
     except ImportError:
         print("Error: PySide6 is required for GUI mode.")
         print("Install it with: pip install PySide6")
@@ -260,6 +261,47 @@ def launch_gui(args: argparse.Namespace):
     actor_manager = ActorManager(storage, provider, tools, memory, config)
     actor_manager.set_loop(agent_loop)
     agent_loop.actor_manager = actor_manager
+
+    from .scheduler import Scheduler
+    scheduler = Scheduler(storage)
+
+    async def _run_shell(schedule):
+        import asyncio as _aio
+        cmd = schedule.get("payload", "")
+        if not cmd:
+            return "No command"
+        proc = await _aio.create_subprocess_shell(
+            cmd, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.PIPE,
+            cwd=schedule.get("workdir") or str(workdir),
+        )
+        stdout, stderr = await _aio.wait_for(proc.communicate(), timeout=300)
+        return stdout.decode(errors="replace")[:1000]
+
+    async def _run_agent_prompt(schedule):
+        prompt = schedule.get("payload", "")
+        session_id = schedule.get("session_id") or ""
+        if not session_id:
+            s = storage.create_session(project["id"], str(workdir), "Scheduled Task")
+            session_id = s["id"]
+        result = await agent_loop.run(
+            session_id=session_id, user_input=prompt,
+            agent_name=schedule.get("agent_name", "build"), workdir=workdir,
+        )
+        return result[:1000] if result else "No response"
+
+    async def _run_workflow(schedule):
+        from .workflow import WorkflowRunner
+        runner = WorkflowRunner(storage)
+        result = await runner.run_workflow(
+            session_id=schedule.get("session_id", ""),
+            script=schedule.get("payload", ""),
+            args={},
+        )
+        return result.get("status", "unknown") if isinstance(result, dict) else str(result)[:1000]
+
+    scheduler.register_executor("shell_command", _run_shell)
+    scheduler.register_executor("agent_prompt", _run_agent_prompt)
+    scheduler.register_executor("workflow", _run_workflow)
 
     project = storage.find_project_by_worktree(str(workdir))
     if not project:
@@ -291,12 +333,44 @@ def launch_gui(args: argparse.Namespace):
         workdir=workdir,
         project=project,
         session_id=session_id,
+        scheduler=scheduler,
     )
+
+    _scheduler_timer = QTimer()
+    _scheduler_timer.setInterval(30000)
+
+    def _scheduler_tick():
+        try:
+            import asyncio as _aio
+            loop = _aio.new_event_loop()
+            loop.run_until_complete(scheduler._check_and_run())
+            loop.close()
+        except Exception:
+            pass
+
+    _scheduler_timer.timeout.connect(_scheduler_tick)
+
+    def _start_scheduler_on_boot():
+        try:
+            import asyncio as _aio
+            loop = _aio.new_event_loop()
+            loop.run_until_complete(scheduler.start())
+            loop.close()
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(lambda: scheduler.stop() if hasattr(scheduler, '_running') else None)
+    app.aboutToQuit.connect(lambda: _scheduler_timer.stop())
+
     window.show()
+    QTimer.singleShot(1000, _start_scheduler_on_boot)
+    _scheduler_timer.start()
     try:
         app.exec()
     finally:
+        _scheduler_timer.stop()
         _disconnect_mcp_for_gui(mcp_client, mcp_runtime)
+        storage.close()
 
 
 async def async_main(args: argparse.Namespace):

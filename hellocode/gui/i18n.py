@@ -139,6 +139,54 @@ _ZH = {
     # Tasks
     "no_summary": "暂无摘要",
     "task_stats": "共 {total} 个 · 待处理 {open} 个 · 进行中 {active} 个 · 已完成 {done} 个",
+
+    # Knowledge Base
+    "knowledge_base": "知识库",
+    "add_source": "添加来源",
+    "add_folder": "添加文件夹",
+    "add_file": "添加文件",
+    "select_folder": "选择文件夹",
+    "select_file": "选择文件",
+    "rebuild_index": "重建索引",
+    "remove_source": "移除来源",
+    "indexed": "已索引",
+    "indexing": "索引中",
+    "index_error": "索引错误",
+    "files": "文件",
+    "chunks": "片段",
+    "total": "总计",
+    "documents": "文档",
+    "skipped": "跳过",
+    "errors": "错误",
+
+    # Schedules
+    "schedules": "定时任务",
+    "new_schedule": "新建定时任务",
+    "edit_schedule": "编辑定时任务",
+    "delete_schedule": "删除定时任务",
+    "delete_schedule_confirm": "确定要删除此定时任务吗？",
+    "schedule_name_placeholder": "输入任务名称",
+    "schedule_payload_placeholder": "输入任务内容",
+    "cron_expression": "Cron 表达式",
+    "interval_seconds": "间隔（秒）",
+    "schedule_method": "调度方式",
+    "schedule_required": "请设置调度方式",
+    "name_required": "请输入名称",
+    "enabled": "已启用",
+    "schedules_count": "个定时任务",
+
+    # Tabs
+    "confirm": "确认",
+    "tab_running_confirm": "此标签页正在运行任务，确定要关闭吗？",
+    "new_tab": "新建标签页",
+    "enable": "启用",
+    "disable": "禁用",
+    "delete": "删除",
+    "error": "错误",
+    "name": "名称",
+    "task_type": "任务类型",
+    "last_run": "上次执行",
+    "actions": "操作",
 }
 
 # ── English translations ──
@@ -274,6 +322,54 @@ _EN = {
     # Tasks
     "no_summary": "No summary",
     "task_stats": "{total} total · {open} open · {active} active · {done} done",
+
+    # Knowledge Base
+    "knowledge_base": "Knowledge Base",
+    "add_source": "Add Source",
+    "add_folder": "Add Folder",
+    "add_file": "Add File",
+    "select_folder": "Select Folder",
+    "select_file": "Select File",
+    "rebuild_index": "Rebuild Index",
+    "remove_source": "Remove Source",
+    "indexed": "Indexed",
+    "indexing": "Indexing",
+    "index_error": "Index Error",
+    "files": "files",
+    "chunks": "chunks",
+    "total": "Total",
+    "documents": "documents",
+    "skipped": "skipped",
+    "errors": "errors",
+
+    # Schedules
+    "schedules": "Schedules",
+    "new_schedule": "New Schedule",
+    "edit_schedule": "Edit Schedule",
+    "delete_schedule": "Delete Schedule",
+    "delete_schedule_confirm": "Are you sure you want to delete this schedule?",
+    "schedule_name_placeholder": "Enter schedule name",
+    "schedule_payload_placeholder": "Enter task payload",
+    "cron_expression": "Cron Expression",
+    "interval_seconds": "Interval (seconds)",
+    "schedule_method": "Schedule Method",
+    "schedule_required": "Please set a schedule method",
+    "name_required": "Please enter a name",
+    "enabled": "enabled",
+    "schedules_count": "schedules",
+
+    # Tabs
+    "confirm": "Confirm",
+    "tab_running_confirm": "This tab has a running task. Close anyway?",
+    "new_tab": "New Tab",
+    "enable": "Enable",
+    "disable": "Disable",
+    "delete": "Delete",
+    "error": "Error",
+    "name": "Name",
+    "task_type": "Task Type",
+    "last_run": "Last Run",
+    "actions": "Actions",
 }
 
 TRANSLATIONS = {

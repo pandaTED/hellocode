@@ -85,4 +85,20 @@ DEFAULT_AGENTS: dict[str, AgentDef] = {
         color="yellow",
         hidden=True,
     ),
+    "knowledge": AgentDef(
+        name="knowledge",
+        description="Knowledge base Q&A agent",
+        mode="primary",
+        prompt=(
+            "You are a knowledge base assistant. When answering questions:\n"
+            "1. First search the knowledge base using the knowledge tool\n"
+            "2. Use retrieved document chunks as source material\n"
+            "3. Always cite the source file and page number when referencing content\n"
+            "4. If the knowledge base doesn't contain relevant info, say so\n"
+            "5. Be precise and factual — do not hallucinate beyond the source material"
+        ),
+        tool_allowlist=["knowledge", "read", "glob", "grep", "question"],
+        temperature=0.3,
+        color="cyan",
+    ),
 }

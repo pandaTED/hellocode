@@ -71,10 +71,22 @@ class MCPConfig:
 
 
 @dataclass
+class KnowledgeConfig:
+    chunk_size: int = 1000
+    chunk_overlap: int = 100
+    supported_types: list[str] = field(default_factory=lambda: [
+        "md", "txt", "pdf", "docx", "xlsx", "xls", "pptx", "csv", "json", "yaml",
+    ])
+    max_file_size_mb: int = 50
+    auto_index: bool = True
+
+
+@dataclass
 class Config:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     agent: dict[str, AgentConfig] = field(default_factory=dict)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     plugin_paths: list[str] = field(default_factory=list)
     data_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "hellocode")
     raw: dict[str, Any] = field(default_factory=dict)
@@ -200,10 +212,13 @@ class Config:
             if isinstance(acfg, dict):
                 agents[name] = AgentConfig(**acfg)
         mcp = MCPConfig(servers=d.get("mcp", {}).get("servers", {}))
+        kb_raw = d.get("knowledge", {})
+        knowledge = KnowledgeConfig(**{k: v for k, v in kb_raw.items() if k in KnowledgeConfig.__dataclass_fields__}) if isinstance(kb_raw, dict) else KnowledgeConfig()
         return cls(
             provider=prov,
             agent=agents,
             mcp=mcp,
+            knowledge=knowledge,
             plugin_paths=d.get("plugin", {}).get("paths", []),
             raw=d,
         )

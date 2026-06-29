@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Signal
 
 logger = logging.getLogger("hellocode.gui.worker")
 
 
 class AgentWorker(QObject):
-    """Runs the agent loop in a background thread."""
-    message_received = Signal(str, str)  # kind, content
-    tool_call_started = Signal(str, dict)  # name, args
-    tool_call_finished = Signal(str, str, bool)  # name, result, success
-    finished = Signal(str)  # final response
-    error = Signal(str)  # error message
+    """Runs the agent loop in a background thread without moveToThread."""
+    message_received = Signal(str, str)
+    tool_call_started = Signal(str, dict)
+    tool_call_finished = Signal(str, str, bool)
+    finished = Signal(str)
+    error = Signal(str)
     thread_finished = Signal()
 
     def __init__(self, agent_loop, session_id: str, user_input: str,
@@ -27,17 +28,13 @@ class AgentWorker(QObject):
         self.user_input = user_input
         self.agent_name = agent_name
         self.workdir = workdir
-        self._thread: QThread | None = None
+        self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopped = False
 
     def start(self):
         self._stopped = False
-        self._thread = QThread()
-        self.moveToThread(self._thread)
-        self._thread.finished.connect(self.thread_finished.emit)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.started.connect(self._run)
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self):
@@ -52,15 +49,27 @@ class AgentWorker(QObject):
                 logger.error("Agent worker error: %s", e)
                 self.error.emit(str(e))
         finally:
+            self._cancel_pending_tasks()
             self._loop.close()
             self._loop = None
-            QThread.currentThread().quit()
+            self.thread_finished.emit()
+
+    def _cancel_pending_tasks(self):
+        if not self._loop or self._loop.is_closed():
+            return
+        to_cancel = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
+        for task in to_cancel:
+            task.cancel()
+        if to_cancel:
+            self._loop.run_until_complete(
+                asyncio.gather(*to_cancel, return_exceptions=True)
+            )
 
     def wait(self, timeout_ms: int = 3000) -> bool:
-        thread = self._thread
-        if not thread or not thread.isRunning():
+        if not self._thread or not self._thread.is_alive():
             return True
-        return thread.wait(timeout_ms)
+        self._thread.join(timeout=timeout_ms / 1000)
+        return not self._thread.is_alive()
 
     async def _execute(self) -> str:
         async def on_message(kind: str, content: str):

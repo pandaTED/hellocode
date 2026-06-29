@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
-from PySide6.QtGui import QTextOption
+from PySide6.QtGui import QFont, QTextOption
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QScrollArea, QLabel,
@@ -179,6 +179,9 @@ class MessageInput(QTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        font = QFont()
+        font.setPointSize(13)
+        self.setFont(font)
         self.setAcceptRichText(False)
         self.setTabChangesFocus(True)
         self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)

@@ -16,6 +16,21 @@ from .base import ExecuteResult, Tool, ToolContext, _truncate
 MAX_OUTPUT = 51200
 logger = logging.getLogger("hellocode.tools")
 
+_DANGEROUS_PATTERNS = [
+    r"\brm\s+-rf\s+/",
+    r"\brm\s+-rf\s+~",
+    r"\bdel\s+/[sS]\b",
+    r"\bformat\s+[a-zA-Z]:",
+    r"\bdd\s+if=.*of=/dev/",
+    r":(){ :\|:& };:",
+    r"\bmkfs\b",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\binit\s+0\b",
+    r"\bcurl.*\|\s*(ba)?sh\b",
+    r"\bwget.*\|\s*(ba)?sh\b",
+]
+
 
 class ReadTool(Tool):
     id = "read"
@@ -245,6 +260,14 @@ class BashTool(Tool):
 
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
         cmd = args["command"]
+        import re as _re
+        for pattern in _DANGEROUS_PATTERNS:
+            if _re.search(pattern, cmd, _re.IGNORECASE):
+                return ExecuteResult(
+                    title="Blocked",
+                    output=f"Command blocked: matches dangerous pattern '{pattern}'",
+                    metadata={"success": False},
+                )
         timeout = (args.get("timeout") or 120000) / 1000
         cwd = args.get("workdir") or str(ctx.workdir)
         logger.info("Bash [%s]: %s", cwd, cmd[:200])
@@ -341,13 +364,18 @@ class WebfetchTool(Tool):
         return None
 
     async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
-        import aiohttp
         url = args["url"]
         safety_error = self._is_safe_url(url)
         if safety_error:
             return ExecuteResult(title="Error", output=safety_error, metadata={"success": False})
         try:
-            async with aiohttp.ClientSession() as session:
+            import aiohttp
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+            }
+            async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     body = await resp.text()
                     if resp.status >= 400:
@@ -357,6 +385,8 @@ class WebfetchTool(Tool):
                             metadata={"success": False, "status": resp.status},
                         )
                     return ExecuteResult(title=f"Fetched {url}", output=_truncate(body))
+        except ImportError:
+            return ExecuteResult(title="Error", output="aiohttp not installed. Run: pip install aiohttp", metadata={"success": False})
         except Exception as e:
             return ExecuteResult(title="Error", output=str(e), metadata={"success": False})
 
@@ -762,3 +792,173 @@ class ApplyPatchTool(Tool):
             return ExecuteResult(title="Apply Patch Error", output="'patch' command not found. Install patch or use Git Bash.")
         except Exception as e:
             return ExecuteResult(title="Apply Patch Error", output=str(e))
+
+
+class KnowledgeTool(Tool):
+    id = "knowledge"
+    description = "Manage knowledge base: add/remove sources, index files, search documents."
+    _engines: dict = {}
+
+    def _get_engine(self, storage, data_dir):
+        key = id(storage)
+        if key not in self._engines:
+            from ..knowledge import KnowledgeEngine
+            self._engines[key] = KnowledgeEngine(storage, data_dir)
+        return self._engines[key]
+
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": [
+                    "add_source", "remove_source", "list_sources", "index",
+                    "search", "get_document", "stats",
+                ]},
+                "name": {"type": "string", "description": "Source name (for add_source)"},
+                "path": {"type": "string", "description": "File or folder path"},
+                "source_id": {"type": "string", "description": "Source ID"},
+                "query": {"type": "string", "description": "Search query"},
+                "document_id": {"type": "string", "description": "Document ID (for get_document)"},
+                "file_type": {"type": "string", "description": "Filter by file type"},
+                "limit": {"type": "integer", "description": "Max results"},
+            },
+            "required": ["operation"],
+        }
+
+    async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
+        if not ctx.memory:
+            return ExecuteResult(title="Knowledge", output=json.dumps({"error": "No memory system available"}))
+        try:
+            data_dir = ctx.memory.data_dir.parent
+            engine = self._get_engine(ctx.memory.storage, data_dir)
+            action = args["operation"]
+
+            if action == "add_source":
+                p = Path(args["path"])
+                if not p.is_absolute():
+                    p = ctx.workdir / p
+                name = args.get("name") or p.name
+                result = engine.add_source(name, p)
+                return ExecuteResult(title="Knowledge", output=json.dumps(result, default=str, ensure_ascii=False))
+
+            elif action == "remove_source":
+                engine.remove_source(args["source_id"])
+                return ExecuteResult(title="Knowledge", output=json.dumps({"status": "removed"}))
+
+            elif action == "list_sources":
+                sources = engine.list_sources()
+                return ExecuteResult(title="Knowledge", output=json.dumps(sources, default=str, ensure_ascii=False))
+
+            elif action == "index":
+                result = engine.index_source(args["source_id"])
+                return ExecuteResult(title="Knowledge", output=json.dumps(result, default=str, ensure_ascii=False))
+
+            elif action == "search":
+                results = engine.search(
+                    args["query"],
+                    source_id=args.get("source_id"),
+                    file_type=args.get("file_type"),
+                    limit=args.get("limit", 10),
+                )
+                output = {"query": args["query"], "results": results}
+                return ExecuteResult(title="Knowledge Search", output=json.dumps(output, default=str, ensure_ascii=False))
+
+            elif action == "get_document":
+                doc = engine.get_document(args["document_id"])
+                if not doc:
+                    return ExecuteResult(title="Knowledge", output=json.dumps({"error": "Document not found"}))
+                chunks = engine.get_document_chunks(args["document_id"])
+                doc["chunks"] = chunks
+                return ExecuteResult(title="Knowledge", output=json.dumps(doc, default=str, ensure_ascii=False))
+
+            elif action == "stats":
+                stats = engine.get_stats()
+                return ExecuteResult(title="Knowledge", output=json.dumps(stats, default=str, ensure_ascii=False))
+
+            else:
+                return ExecuteResult(title="Knowledge", output=json.dumps({"error": f"Unknown action: {action}"}))
+        except Exception as e:
+            return ExecuteResult(title="Knowledge Error", output=json.dumps({"error": str(e)}))
+
+
+class ScheduleTool(Tool):
+    id = "schedule"
+    description = "Manage scheduled tasks: create, list, enable, disable, delete, view runs."
+
+    def parameters_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": [
+                    "create", "list", "enable", "disable", "delete", "runs",
+                ]},
+                "name": {"type": "string", "description": "Schedule name"},
+                "task_type": {"type": "string", "enum": ["workflow", "agent_prompt", "shell_command"]},
+                "cron_expression": {"type": "string", "description": "5-field cron expression"},
+                "interval_seconds": {"type": "integer", "description": "Interval in seconds"},
+                "payload": {"type": "string", "description": "Task payload"},
+                "agent_name": {"type": "string", "description": "Agent name for agent_prompt type"},
+                "schedule_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["operation"],
+        }
+
+    async def execute(self, args: dict, ctx: ToolContext) -> ExecuteResult:
+        if not ctx.storage:
+            return ExecuteResult(title="Schedule", output=json.dumps({"error": "No storage available"}))
+        try:
+            action = args["operation"]
+
+            if action == "create":
+                if not args.get("name"):
+                    return ExecuteResult(title="Schedule", output=json.dumps({"error": "name is required"}))
+                if not args.get("task_type"):
+                    return ExecuteResult(title="Schedule", output=json.dumps({"error": "task_type is required"}))
+                schedule_id = ctx.storage.uid()
+                result = ctx.storage.create_schedule(
+                    id=schedule_id,
+                    name=args["name"],
+                    task_type=args["task_type"],
+                    payload=args.get("payload", ""),
+                    cron_expression=args.get("cron_expression"),
+                    interval_seconds=args.get("interval_seconds"),
+                    agent_name=args.get("agent_name", "build"),
+                    session_id=ctx.session_id,
+                    workdir=str(ctx.workdir),
+                    description=args.get("description"),
+                )
+                return ExecuteResult(title="Schedule", output=json.dumps(result, default=str, ensure_ascii=False))
+
+            elif action == "list":
+                schedules = ctx.storage.list_schedules()
+                return ExecuteResult(title="Schedule", output=json.dumps(schedules, default=str, ensure_ascii=False))
+
+            elif action == "enable":
+                if not args.get("schedule_id"):
+                    return ExecuteResult(title="Schedule", output=json.dumps({"error": "schedule_id is required"}))
+                ctx.storage.update_schedule(args["schedule_id"], enabled=1)
+                return ExecuteResult(title="Schedule", output=json.dumps({"status": "enabled"}))
+
+            elif action == "disable":
+                if not args.get("schedule_id"):
+                    return ExecuteResult(title="Schedule", output=json.dumps({"error": "schedule_id is required"}))
+                ctx.storage.update_schedule(args["schedule_id"], enabled=0)
+                return ExecuteResult(title="Schedule", output=json.dumps({"status": "disabled"}))
+
+            elif action == "delete":
+                if not args.get("schedule_id"):
+                    return ExecuteResult(title="Schedule", output=json.dumps({"error": "schedule_id is required"}))
+                ctx.storage.delete_schedule(args["schedule_id"])
+                return ExecuteResult(title="Schedule", output=json.dumps({"status": "deleted"}))
+
+            elif action == "runs":
+                if not args.get("schedule_id"):
+                    return ExecuteResult(title="Schedule", output=json.dumps({"error": "schedule_id is required"}))
+                runs = ctx.storage.get_schedule_runs(args["schedule_id"], args.get("limit", 20))
+                return ExecuteResult(title="Schedule", output=json.dumps(runs, default=str, ensure_ascii=False))
+
+            else:
+                return ExecuteResult(title="Schedule", output=json.dumps({"error": f"Unknown action: {action}"}))
+        except Exception as e:
+            return ExecuteResult(title="Schedule Error", output=json.dumps({"error": str(e)}))

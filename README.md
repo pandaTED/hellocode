@@ -7,11 +7,14 @@ Terminal-native AI coding assistant written in Python. A lightweight, open-sourc
 - **Multi-Agent System** — Main agent executes tasks, sub-agents handle parallel subtasks
 - **Persistent Memory** — Cross-session memory with SQLite FTS5 full-text search
 - **Autonomous Loop** — Agent continues executing until goal is achieved
-- **16+ Built-in Tools** — File operations, shell execution, web fetching, memory search
+- **18+ Built-in Tools** — File operations, shell execution, web fetching, memory, knowledge base, scheduling
 - **MCP Integration** — Connect external tool servers via Model Context Protocol
 - **Plugin System** — Extensible hook architecture
 - **Task Management** — Tree-structured task lifecycle (open → in_progress → done)
 - **Rich TUI** — Beautiful terminal interface with markdown rendering
+- **PySide6 GUI** — Desktop interface with multi-tab support, knowledge base panel, schedule management
+- **Knowledge Base** — Index and search documents (MD, PDF, DOCX, XLSX, PPTX, TXT, CSV, JSON)
+- **Scheduled Tasks** — Cron and interval-based task execution (shell commands, agent prompts, workflows)
 
 ## Quick Start
 
@@ -21,6 +24,10 @@ Terminal-native AI coding assistant written in Python. A lightweight, open-sourc
 git clone https://github.com/pandaTED/hellocode.git
 cd hellocode
 pip install -e .
+# For GUI mode:
+pip install -e ".[gui]"
+# For knowledge base document parsing:
+pip install -e ".[kb]"
 ```
 
 ### Configure
