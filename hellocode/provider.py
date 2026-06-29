@@ -6,7 +6,9 @@ import asyncio
 import logging
 from typing import Any, AsyncIterator
 
-from openai import AsyncOpenAI, RateLimitError
+from openai import AsyncOpenAI, RateLimitError, APIConnectionError, APITimeoutError, InternalServerError
+
+_RETRYABLE_ERRORS = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
 
 logger = logging.getLogger("hellocode.provider")
 
@@ -83,10 +85,10 @@ class LLMProvider:
                         for tc in choice.message.tool_calls
                     ]
                 return result
-            except RateLimitError as e:
+            except _RETRYABLE_ERRORS as e:
                 if attempt < self._max_retries - 1:
                     delay = self._base_delay * (2 ** attempt)
-                    logger.warning("Rate limited, retrying in %.1fs (attempt %d/%d)", delay, attempt + 1, self._max_retries)
+                    logger.warning("Request failed (%s), retrying in %.1fs (attempt %d/%d)", type(e).__name__, delay, attempt + 1, self._max_retries)
                     await asyncio.sleep(delay)
                 else:
                     raise
@@ -133,10 +135,10 @@ class LLMProvider:
                 async for chunk in self._stream(kwargs):
                     yield chunk
                 return
-            except RateLimitError as e:
+            except _RETRYABLE_ERRORS as e:
                 if attempt < self._max_retries - 1:
                     delay = self._base_delay * (2 ** attempt)
-                    logger.warning("Rate limited, retrying in %.1fs (attempt %d/%d)", delay, attempt + 1, self._max_retries)
+                    logger.warning("Stream failed (%s), retrying in %.1fs (attempt %d/%d)", type(e).__name__, delay, attempt + 1, self._max_retries)
                     await asyncio.sleep(delay)
                 else:
                     raise

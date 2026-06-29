@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -9,6 +12,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTreeWidget, QTreeWidgetItem, QPushButton,
+    QFileDialog,
 )
 
 from .i18n import t
@@ -18,12 +22,14 @@ class FileBrowser(QWidget):
     """File browser with tree view."""
 
     file_selected = Signal(str)  # file path
+    workdir_changed = Signal(str)  # new workdir path
 
     def __init__(self, theme=None, parent=None):
         super().__init__(parent)
         self.setObjectName("sidePanel")
         self._theme = theme
         self._root_path: Path | None = None
+        self._icon_cache: dict[str, QIcon] = {}
         self._setup_ui()
 
     def _setup_ui(self):
@@ -34,13 +40,30 @@ class FileBrowser(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Header with refresh button
+        # Header with change dir and refresh buttons
         header_layout = QHBoxLayout()
         self.header_label = QLabel(t("files"))
         self.header_label.setObjectName("sectionTitle")
         header_layout.addWidget(self.header_label)
 
-        self.refresh_btn = QPushButton("刷新" if t("refresh_files") == "刷新文件" else "R")
+        self.changedir_btn = QPushButton("📁")
+        self.changedir_btn.setToolTip(t("change_directory"))
+        self.changedir_btn.setFixedSize(36, 24)
+        self.changedir_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {muted_color};
+                border: none;
+                font-size: 16px;
+            }}
+            QPushButton:hover {{
+                color: {th.text_primary if th else "#cdd6f4"};
+            }}
+        """)
+        self.changedir_btn.clicked.connect(self._change_directory)
+        header_layout.addWidget(self.changedir_btn)
+
+        self.refresh_btn = QPushButton("🔄")
         self.refresh_btn.setToolTip(t("refresh_files"))
         self.refresh_btn.setFixedSize(36, 24)
         self.refresh_btn.setStyleSheet(f"""
@@ -74,13 +97,23 @@ class FileBrowser(QWidget):
         self.tree.setAnimated(True)
         self.tree.setIndentation(16)
         self.tree.setRootIsDecorated(True)
-        self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.tree.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.tree)
 
     def set_root(self, path: Path):
         self._root_path = path
         self.path_label.setText(str(path))
         self._refresh()
+
+    def _change_directory(self):
+        dir_path = QFileDialog.getExistingDirectory(
+            self, t("select_directory"), str(self._root_path or Path.cwd())
+        )
+        if dir_path:
+            self._root_path = Path(dir_path)
+            self.path_label.setText(dir_path)
+            self.workdir_changed.emit(dir_path)
+            self._refresh()
 
     def _refresh(self):
         if not self._root_path:
@@ -131,20 +164,41 @@ class FileBrowser(QWidget):
         color = self._theme.text_muted if self._theme else "#6c7086"
         return QBrush(QColor(color))
 
-    def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int):
+    def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if path and Path(path).is_file():
             self.file_selected.emit(path)
+            self._open_file_externally(path)
+
+    def _open_file_externally(self, file_path: str):
+        """Open file with system default program."""
+        try:
+            path = Path(file_path)
+            if sys.platform == "win32":
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as e:
+            print(f"Failed to open file: {e}")
 
     def _folder_icon(self) -> QIcon:
-        # Use a simple colored icon
+        cache_key = "folder"
+        if cache_key in self._icon_cache:
+            return self._icon_cache[cache_key]
         from PySide6.QtGui import QPixmap, QColor
         pixmap = QPixmap(16, 16)
         color = self._theme.info if self._theme else "#89b4fa"
         pixmap.fill(QColor(color))
-        return QIcon(pixmap)
+        icon = QIcon(pixmap)
+        self._icon_cache[cache_key] = icon
+        return icon
 
     def _file_icon(self, suffix: str) -> QIcon:
+        cache_key = f"file_{suffix.lower()}"
+        if cache_key in self._icon_cache:
+            return self._icon_cache[cache_key]
         from PySide6.QtGui import QPixmap, QColor
         th = self._theme
         colors = {
@@ -160,14 +214,28 @@ class FileBrowser(QWidget):
         color = colors.get(suffix.lower(), th.text_muted if th else "#6c7086")
         pixmap = QPixmap(16, 16)
         pixmap.fill(QColor(color))
-        return QIcon(pixmap)
+        icon = QIcon(pixmap)
+        self._icon_cache[cache_key] = icon
+        return icon
 
     def update_theme(self, theme) -> None:
         self._theme = theme
+        self._icon_cache.clear()
         muted_color = theme.text_muted
         self.path_label.setStyleSheet(
             f"color: {muted_color}; font-size: 11px; padding: 4px 12px;"
         )
+        self.changedir_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {muted_color};
+                border: none;
+                font-size: 16px;
+            }}
+            QPushButton:hover {{
+                color: {theme.text_primary};
+            }}
+        """)
         self.refresh_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: transparent;
@@ -183,5 +251,5 @@ class FileBrowser(QWidget):
 
     def update_language(self) -> None:
         self.header_label.setText(t("files"))
-        self.refresh_btn.setText("刷新" if t("refresh_files") == "刷新文件" else "R")
+        self.changedir_btn.setToolTip(t("change_directory"))
         self.refresh_btn.setToolTip(t("refresh_files"))

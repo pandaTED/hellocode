@@ -162,6 +162,7 @@ class AgentLoop:
             if iteration > max_iterations:
                 break
 
+            stream = None
             try:
                 # Use streaming to display tokens in real-time
                 stream = await self.provider.chat(
@@ -188,6 +189,12 @@ class AgentLoop:
                 if on_message:
                     await on_message("error", error_msg)
                 break
+            finally:
+                if stream is not None:
+                    try:
+                        await stream.aclose()
+                    except Exception:
+                        pass
 
             # Build single assistant message (content + tool_calls must be together)
             assistant_msg = {"role": "assistant"}

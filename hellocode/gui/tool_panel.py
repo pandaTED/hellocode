@@ -243,13 +243,15 @@ class ToolPanel(QWidget):
         self.list_widget.addItem(item)
         self.list_widget.setItemWidget(item, entry)
 
-        # Keep max 50 entries to avoid memory issues
-        if self.list_widget.count() > 50:
+        MAX_ENTRIES = 50
+        if self.list_widget.count() > MAX_ENTRIES:
             old_item = self.list_widget.takeItem(0)
             if old_item:
                 old_item_widget = self.list_widget.itemWidget(old_item)
                 if old_item_widget:
                     old_item_widget.deleteLater()
+            if self._entries:
+                self._entries.pop(0)
 
         self.list_widget.scrollToBottom()
         return entry

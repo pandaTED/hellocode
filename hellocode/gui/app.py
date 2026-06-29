@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, Slot
+from PySide6.QtCore import QPoint, Qt, Slot, QTimer
 from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -30,6 +30,7 @@ from .config_dialog import ConfigDialog
 from .worker import AgentWorker
 from .knowledge_panel import KnowledgePanel
 from .schedule_dialog import ScheduleDialog
+from .schedule_log_panel import ScheduleLogPanel
 from .themes import get_theme, get_theme_names, generate_stylesheet
 from .i18n import t, set_language, get_language, get_language_names
 
@@ -86,6 +87,11 @@ class TabState:
     task_panel: TaskPanel
     worker: AgentWorker | None = None
     agent_name: str = "build"
+    _tool_entries: list = None
+
+    def __post_init__(self):
+        if self._tool_entries is None:
+            self._tool_entries = []
 
 
 class HelloCodeGUI(QMainWindow):
@@ -332,12 +338,15 @@ class HelloCodeGUI(QMainWindow):
         right_splitter = QSplitter(Qt.Orientation.Vertical)
         self.tool_panel = ToolPanel(self._theme)
         right_splitter.addWidget(self.tool_panel)
+        self.schedule_log_panel = ScheduleLogPanel(self.storage, self._theme)
+        right_splitter.addWidget(self.schedule_log_panel)
         self.knowledge_panel = KnowledgePanel(self.storage, self.config.data_dir, self._theme)
         right_splitter.addWidget(self.knowledge_panel)
         self.file_browser = FileBrowser(self._theme)
         self.file_browser.file_selected.connect(self._on_file_selected)
+        self.file_browser.workdir_changed.connect(self._on_workdir_changed)
         right_splitter.addWidget(self.file_browser)
-        right_splitter.setSizes([140, 140, 220])
+        right_splitter.setSizes([120, 120, 120, 180])
         right_layout.addWidget(right_splitter)
         self.main_splitter.addWidget(right_panel)
 
@@ -349,7 +358,7 @@ class HelloCodeGUI(QMainWindow):
         self._right_panel = right_panel
 
     def _setup_title_bar(self, root_layout: QVBoxLayout):
-        t = self._theme
+        th = self._theme
         self.title_bar = QFrame()
         title_bar = self.title_bar
         title_bar.setObjectName("titleBar")
@@ -367,7 +376,7 @@ class HelloCodeGUI(QMainWindow):
         self.title_label = QLabel("HelloCode")
         self.title_label.setFixedHeight(34)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        self.title_label.setStyleSheet(f"color: {t.text_secondary}; font-size: 13px; font-weight: 600; padding: 0;")
+        self.title_label.setStyleSheet(f"color: {th.text_secondary}; font-size: 13px; font-weight: 600; padding: 0;")
         layout.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.title_menu_host = QWidget()
@@ -378,9 +387,28 @@ class HelloCodeGUI(QMainWindow):
         layout.addWidget(self.title_menu_host, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addStretch(1)
 
-        self.min_button = WindowControlButton("minimize", t.warning)
-        self.max_button = WindowControlButton("maximize", t.success)
-        self.close_button = WindowControlButton("close", t.error)
+        self.new_tab_btn = QPushButton("+")
+        self.new_tab_btn.setFixedSize(34, 34)
+        self.new_tab_btn.setToolTip(t("new_session"))
+        self.new_tab_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {th.text_secondary};
+                border: none;
+                font-size: 18px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                color: {th.text_primary};
+                background-color: {th.border};
+            }}
+        """)
+        self.new_tab_btn.clicked.connect(self._new_session)
+        layout.addWidget(self.new_tab_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.min_button = WindowControlButton("minimize", th.warning)
+        self.max_button = WindowControlButton("maximize", th.success)
+        self.close_button = WindowControlButton("close", th.error)
         self.min_button.clicked.connect(self.showMinimized)
         self.max_button.clicked.connect(self._toggle_maximized)
         self.close_button.clicked.connect(self.close)
@@ -390,21 +418,21 @@ class HelloCodeGUI(QMainWindow):
         root_layout.addWidget(title_bar)
 
     def _style_title_bar(self) -> None:
-        t = self._theme
+        th = self._theme
         self.title_bar.setStyleSheet(f"""
             QFrame#titleBar {{
-                background-color: {t.bg_panel};
-                border-bottom: 1px solid {t.border};
+                background-color: {th.bg_panel};
+                border-bottom: 1px solid {th.border};
             }}
         """)
         if hasattr(self, "title_label"):
             self.title_label.setStyleSheet(
-                f"color: {t.text_secondary}; font-size: 13px; font-weight: 600; padding: 0;"
+                f"color: {th.text_secondary}; font-size: 13px; font-weight: 600; padding: 0;"
             )
         if hasattr(self, "min_button"):
-            self.min_button.set_color(t.warning)
-            self.max_button.set_color(t.success)
-            self.close_button.set_color(t.error)
+            self.min_button.set_color(th.warning)
+            self.max_button.set_color(th.success)
+            self.close_button.set_color(th.error)
 
     def _toggle_maximized(self):
         if self.isMaximized():
@@ -554,6 +582,11 @@ class HelloCodeGUI(QMainWindow):
             self.task_panel.load_tasks(tab.session_id)
             self._load_chat_history(tab.session_id, tab.chat_panel)
 
+        if not hasattr(self, '_schedule_log_timer') or self._schedule_log_timer is None:
+            self._schedule_log_timer = QTimer(self)
+            self._schedule_log_timer.timeout.connect(self._refresh_schedule_logs)
+            self._schedule_log_timer.start(30000)
+
     @Slot(str)
     def _on_message_sent(self, text: str):
         tab = self._get_active_tab()
@@ -615,20 +648,19 @@ class HelloCodeGUI(QMainWindow):
 
     @Slot(str, dict)
     def _on_tool_call(self, name: str, args: dict, tab: TabState):
-        entry = self.tool_panel.add_tool_call(name, args)
-        tab._current_tool_entry = entry
+        tab._tool_entries.append(self.tool_panel.add_tool_call(name, args))
         if name == "question":
             tab.chat_panel.add_tool_call(name, args)
 
     @Slot(str, str, bool)
     def _on_tool_result(self, name: str, result: str, success: bool, tab: TabState):
-        entry = getattr(tab, "_current_tool_entry", None)
-        if entry:
+        entries = getattr(tab, "_tool_entries", [])
+        if entries:
+            entry = entries[-1]
             if success:
                 entry.set_success(result)
             else:
                 entry.set_error(result)
-            tab._current_tool_entry = None
 
     @Slot(str)
     def _on_agent_finished(self, result: str, tab: TabState):
@@ -689,7 +721,8 @@ class HelloCodeGUI(QMainWindow):
         self.task_panel.load_tasks(tab.session_id)
 
     def _delete_session(self, session_id: str):
-        if self._worker and session_id == self.session_id:
+        tab = self._get_active_tab()
+        if tab and tab.worker and session_id == tab.session_id:
             self._show_warning(t("wait_current_run_delete_session"))
             return
         if not self._confirm_action(
@@ -761,7 +794,12 @@ class HelloCodeGUI(QMainWindow):
 
     def _open_schedules(self):
         dialog = ScheduleDialog(self.storage, self, self._theme)
+        dialog.schedule_changed.connect(self._refresh_schedule_logs)
         dialog.exec()
+
+    def _refresh_schedule_logs(self):
+        if hasattr(self, 'schedule_log_panel'):
+            self.schedule_log_panel.refresh()
 
     def _on_config_changed(self):
         self.provider = LLMProvider(self.config)
@@ -770,9 +808,10 @@ class HelloCodeGUI(QMainWindow):
         self.model_label.setText(f"{t('model_label')}{self.config.get_provider_model()}")
 
     def _clear_chat(self):
-        if self._worker:
-            self._show_warning(t("wait_current_run_clear_sessions"))
-            return
+        for tab in self._tabs.values():
+            if tab.worker:
+                self._show_warning(t("wait_current_run_clear_sessions"))
+                return
         if not self._confirm_action(
             t("delete_all_sessions_title"),
             t("delete_all_sessions_confirm"),
@@ -780,8 +819,7 @@ class HelloCodeGUI(QMainWindow):
         ):
             return
 
-        for session in self.storage.list_sessions(self.project["id"], limit=10000):
-            self.storage.delete_session(session["id"])
+        self.storage.delete_all_sessions(self.project["id"])
 
         session = self.storage.create_session(
             self.project["id"], str(self.workdir), t("new_session_title")
@@ -845,6 +883,8 @@ class HelloCodeGUI(QMainWindow):
         if hasattr(self, 'knowledge_panel'):
             self.knowledge_panel.update_theme(self._theme)
             self.knowledge_panel.load_sources()
+        if hasattr(self, 'schedule_log_panel'):
+            self.schedule_log_panel.update_theme(self._theme)
 
     def _switch_language(self, lang: str):
         set_language(lang)
@@ -865,11 +905,43 @@ class HelloCodeGUI(QMainWindow):
         if hasattr(self, 'knowledge_panel'):
             self.knowledge_panel.update_language()
             self.knowledge_panel.load_sources()
+        if hasattr(self, 'schedule_log_panel'):
+            self.schedule_log_panel.update_language()
 
     @Slot(str)
     def _on_file_selected(self, file_path: str):
         """Handle file selection from browser."""
         self.status_label.setText(f"{t('file_label')}{file_path}")
+
+    @Slot(str)
+    def _on_workdir_changed(self, new_workdir: str):
+        """Handle workdir change from file browser."""
+        self.workdir = Path(new_workdir)
+        self.project = self.storage.find_project_by_worktree(str(self.workdir))
+        if not self.project:
+            self.project = self.storage.create_project(str(self.workdir), self.workdir.name)
+
+        sessions = self.storage.list_sessions(self.project["id"], limit=1)
+        if sessions:
+            self.session_id = sessions[0]["id"]
+        else:
+            session = self.storage.create_session(
+                self.project["id"], str(self.workdir), t("new_session_title")
+            )
+            self.session_id = session["id"]
+
+        tab = self._get_active_tab()
+        if tab:
+            tab.workdir = self.workdir
+            tab.session_id = self.session_id
+            tab.chat_panel.workdir = self.workdir
+            tab.chat_panel.clear()
+            tab.tool_panel.clear()
+        self.session_panel.load_sessions(self.project["id"])
+        self.session_panel.set_current_session(self.session_id)
+        self.task_panel.load_tasks(self.session_id)
+        if tab:
+            self._load_chat_history(self.session_id, tab.chat_panel)
 
     def _confirm_action(self, title: str, message: str, confirm_text: str) -> bool:
         box = QMessageBox(self)
@@ -910,13 +982,7 @@ class HelloCodeGUI(QMainWindow):
             self._worker.wait(3000)
             self._worker = None
         if self._scheduler:
-            try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(self._scheduler.stop())
-                loop.close()
-            except Exception:
-                pass
+            self._scheduler._running = False
         try:
             self.storage.close()
         except Exception:

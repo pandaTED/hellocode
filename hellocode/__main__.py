@@ -58,10 +58,16 @@ def _connect_mcp_for_gui(config: Config, tools) -> tuple[MCPClient, tuple[asynci
 
     thread = threading.Thread(target=run_loop, name="hellocode-mcp", daemon=True)
     thread.start()
-    future = asyncio.run_coroutine_threadsafe(mcp_client.connect_all(), loop)
-    for tool in future.result(timeout=60):
-        tools.register(tool)
     return mcp_client, (loop, thread)
+
+
+def _do_mcp_connect(mcp_client, runtime, tools):
+    try:
+        future = asyncio.run_coroutine_threadsafe(mcp_client.connect_all(), runtime[0])
+        for tool in future.result(timeout=15):
+            tools.register(tool)
+    except Exception:
+        pass
 
 
 def _disconnect_mcp_for_gui(
@@ -281,7 +287,10 @@ def launch_gui(args: argparse.Namespace):
         prompt = schedule.get("payload", "")
         session_id = schedule.get("session_id") or ""
         if not session_id:
-            s = storage.create_session(project["id"], str(workdir), "Scheduled Task")
+            proj = storage.find_project_by_worktree(str(workdir))
+            if not proj:
+                proj = storage.create_project(str(workdir), workdir.name)
+            s = storage.create_session(proj["id"], str(workdir), "Scheduled Task")
             session_id = s["id"]
         result = await agent_loop.run(
             session_id=session_id, user_input=prompt,
@@ -340,30 +349,37 @@ def launch_gui(args: argparse.Namespace):
     _scheduler_timer.setInterval(30000)
 
     def _scheduler_tick():
-        try:
-            import asyncio as _aio
-            loop = _aio.new_event_loop()
-            loop.run_until_complete(scheduler._check_and_run())
-            loop.close()
-        except Exception:
-            pass
+        import threading as _threading
+        def _run_in_thread():
+            try:
+                import asyncio as _aio
+                loop = _aio.new_event_loop()
+                try:
+                    loop.run_until_complete(scheduler._check_and_run())
+                finally:
+                    pending = _aio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(_aio.gather(*pending, return_exceptions=True))
+                    loop.close()
+            except Exception:
+                pass
+        _threading.Thread(target=_run_in_thread, daemon=True).start()
 
     _scheduler_timer.timeout.connect(_scheduler_tick)
 
-    def _start_scheduler_on_boot():
-        try:
-            import asyncio as _aio
-            loop = _aio.new_event_loop()
-            loop.run_until_complete(scheduler.start())
-            loop.close()
-        except Exception:
-            pass
+    def _on_quit():
+        scheduler._running = False
+        _scheduler_timer.stop()
 
-    app.aboutToQuit.connect(lambda: scheduler.stop() if hasattr(scheduler, '_running') else None)
-    app.aboutToQuit.connect(lambda: _scheduler_timer.stop())
+    app.aboutToQuit.connect(_on_quit)
 
     window.show()
-    QTimer.singleShot(1000, _start_scheduler_on_boot)
+
+    if mcp_runtime:
+        QTimer.singleShot(500, lambda: _do_mcp_connect(mcp_client, mcp_runtime, tools))
+
     _scheduler_timer.start()
     try:
         app.exec()

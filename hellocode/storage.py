@@ -242,6 +242,13 @@ CREATE TABLE IF NOT EXISTS schedule_run (
   error_message TEXT,
   FOREIGN KEY (schedule_id) REFERENCES schedule(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_message_session ON message(session_id, time_created);
+CREATE INDEX IF NOT EXISTS idx_part_message ON part(message_id);
+CREATE INDEX IF NOT EXISTS idx_schedule_next_run ON schedule(enabled, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_inbox_receiver ON inbox(receiver_session_id, receiver_actor_id);
+CREATE INDEX IF NOT EXISTS idx_task_event_session ON task_event(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_project ON session(project_id);
 """
 
 FTS_SCHEMA = """
@@ -294,7 +301,7 @@ class Storage:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._init_schema()
         logger.info("Storage initialized: %s", db_path)
 
@@ -524,6 +531,20 @@ class Storage:
         self.clear_session(sid)
         with self._lock:
             self.conn.execute("DELETE FROM session WHERE id=?", (sid,))
+            self.conn.commit()
+
+    def delete_all_sessions(self, project_id: str) -> None:
+        """Delete all sessions and child rows for a project in one transaction."""
+        with self._lock:
+            self.conn.execute("DELETE FROM part WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
+            self.conn.execute("DELETE FROM message WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
+            self.conn.execute("DELETE FROM history_fts WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
+            self.conn.execute("DELETE FROM task_event WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
+            self.conn.execute("DELETE FROM task WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
+            self.conn.execute("DELETE FROM actor_registry WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
+            self.conn.execute("DELETE FROM inbox WHERE receiver_session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
+            self.conn.execute("DELETE FROM workflow_run WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
+            self.conn.execute("DELETE FROM session WHERE project_id=?", (project_id,))
             self.conn.commit()
 
     # ── Message ──
