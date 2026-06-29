@@ -237,7 +237,14 @@ class PerformancePanel(QWidget):
 
     def update_theme(self, theme):
         self._theme = theme
+        th = theme
+        self.header_label.setStyleSheet(f"color: {th.text_secondary}; font-size: 13px; font-weight: 600;")
+        self.refresh_btn.setStyleSheet(f"QPushButton {{ background: transparent; color: {th.text_muted}; border: none; font-size: 12px; }}")
+        for card in [self.token_card, self.request_card, self.time_card, self.cost_card, self.today_card]:
+            card.update_theme(theme)
         self.refresh()
 
     def update_language(self):
+        if hasattr(self, 'header_label'):
+            self.header_label.setText(t("performance"))
         self.refresh()

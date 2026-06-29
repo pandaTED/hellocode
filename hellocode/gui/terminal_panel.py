@@ -150,6 +150,8 @@ class TerminalPanel(QWidget):
             return
 
         self._command_history.append(command)
+        if len(self._command_history) > 100:
+            self._command_history = self._command_history[-100:]
         self._history_index = len(self._command_history)
 
         self.input_edit.clear()
@@ -175,7 +177,7 @@ class TerminalPanel(QWidget):
 
         try:
             if sys.platform == "win32":
-                proc = subprocess.Popen(
+                self._process = subprocess.Popen(
                     command,
                     shell=True,
                     stdout=subprocess.PIPE,
@@ -186,7 +188,7 @@ class TerminalPanel(QWidget):
                     errors="replace",
                 )
             else:
-                proc = subprocess.Popen(
+                self._process = subprocess.Popen(
                     command,
                     shell=True,
                     stdout=subprocess.PIPE,
@@ -195,19 +197,21 @@ class TerminalPanel(QWidget):
                     text=True,
                 )
 
-            output, _ = proc.communicate(timeout=30)
+            output, _ = self._process.communicate(timeout=30)
             if output:
                 self._append_output(output)
-            if proc.returncode != 0:
-                self._append_output(f"[{t('exit_code')}: {proc.returncode}]\n")
+            if self._process.returncode != 0:
+                self._append_output(f"[{t('exit_code')}: {self._process.returncode}]\n")
 
             self.command_executed.emit(command, output or "")
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
+            self._process.kill()
+            self._process.communicate()
             self._append_output(f"[{t('timeout')}] {t('timeout_message')}\n")
         except Exception as e:
             self._append_output(f"[{t('error')}] {e}\n")
+        finally:
+            self._process = None
 
     def _append_output(self, text: str):
         self.output_area.moveCursor(QTextCursor.MoveOperation.End)
@@ -239,6 +243,37 @@ class TerminalPanel(QWidget):
 
     def update_theme(self, theme):
         self._theme = theme
+        th = theme
+        self.output_area.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {th.bg_panel};
+                color: {th.text_primary};
+                border: none;
+                padding: 8px;
+            }}
+        """)
+        self.input_edit.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {th.bg_surface};
+                color: {th.text_primary};
+                border: 1px solid {th.border};
+                border-radius: 4px;
+                padding: 4px 8px;
+            }}
+        """)
+        self.path_label.setStyleSheet(f"color: {th.success}; font-family: Consolas; font-size: 12px; font-weight: bold;")
+        self.send_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {th.accent};
+                color: {th.bg_panel};
+                border: none;
+                border-radius: 4px;
+                font-size: 16px;
+                font-weight: bold;
+            }}
+        """)
+        self.header_label.setStyleSheet(f"color: {th.text_secondary}; font-size: 13px; font-weight: 600;")
+        self.clear_btn.setStyleSheet(f"QPushButton {{ background: transparent; color: {th.text_muted}; border: none; font-size: 12px; }}")
 
     def update_language(self):
         if hasattr(self, 'header_label'):

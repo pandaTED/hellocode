@@ -42,9 +42,9 @@ def export_chat_to_markdown(chat_panel, session_id: str, parent=None) -> bool:
 def _build_markdown(messages: list[dict], session_id: str) -> str:
     """Build Markdown content from messages."""
     lines = [
-        f"# Chat Session: {session_id[:8]}",
+        f"# {t('chat_session')}: {session_id[:8]}",
         f"",
-        f"Exported at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"{t('exported_at')}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"",
         "---",
         "",
@@ -53,26 +53,18 @@ def _build_markdown(messages: list[dict], session_id: str) -> str:
     for msg in messages:
         role = msg.get("role", "unknown")
         content = msg.get("content", "")
-        timestamp = msg.get("timestamp", "")
 
         if role == "user":
-            lines.append(f"## You")
-            if timestamp:
-                lines.append(f"*{timestamp}*")
+            lines.append(f"## {t('you')}")
             lines.append("")
             lines.append(content)
             lines.append("")
         elif role == "assistant":
-            lines.append(f"## Assistant")
-            if timestamp:
-                lines.append(f"*{timestamp}*")
+            lines.append(f"## {t('assistant')}")
             lines.append("")
             lines.append(content)
             lines.append("")
-        elif role == "system":
-            lines.append(f"> {content}")
-            lines.append("")
 
     lines.append("---")
-    lines.append(f"*Session ID: {session_id}*")
+    lines.append(f"*{t('session_id')}: {session_id}*")
     return "\n".join(lines)

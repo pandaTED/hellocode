@@ -214,6 +214,9 @@ _ZH = {
     "export_success": "导出成功",
     "export_failed": "导出失败",
     "no_messages_to_export": "没有可导出的消息",
+    "chat_session": "对话会话",
+    "exported_at": "导出时间",
+    "session_id": "会话 ID",
 
     # Bookmarks
     "bookmarks": "书签",
@@ -243,8 +246,6 @@ _ZH = {
     "new_tab": "新建标签页",
     "enable": "启用",
     "disable": "禁用",
-    "delete": "删除",
-    "error": "错误",
     "name": "名称",
     "task_type": "任务类型",
     "last_run": "上次执行",
@@ -459,6 +460,9 @@ _EN = {
     "export_success": "Export successful",
     "export_failed": "Export failed",
     "no_messages_to_export": "No messages to export",
+    "chat_session": "Chat Session",
+    "exported_at": "Exported at",
+    "session_id": "Session ID",
 
     # Bookmarks
     "bookmarks": "Bookmarks",
@@ -488,8 +492,6 @@ _EN = {
     "new_tab": "New Tab",
     "enable": "Enable",
     "disable": "Disable",
-    "delete": "Delete",
-    "error": "Error",
     "name": "Name",
     "task_type": "Task Type",
     "last_run": "Last Run",
