@@ -31,6 +31,10 @@ from .worker import AgentWorker
 from .knowledge_panel import KnowledgePanel
 from .schedule_dialog import ScheduleDialog
 from .schedule_log_panel import ScheduleLogPanel
+from .terminal_panel import TerminalPanel
+from .performance_panel import PerformancePanel
+from .chat_export import export_chat_to_markdown
+from .bookmarks import BookmarkManager
 from .themes import get_theme, get_theme_names, generate_stylesheet
 from .i18n import t, set_language, get_language, get_language_names
 
@@ -119,6 +123,7 @@ class HelloCodeGUI(QMainWindow):
         self._tabs: dict[str, TabState] = {}
         self._active_tab_id: str | None = None
         self._scheduler = scheduler
+        self._bookmark_manager = BookmarkManager(storage)
 
         self._setup_window()
         self._setup_ui()
@@ -168,6 +173,11 @@ class HelloCodeGUI(QMainWindow):
         schedules.setShortcut(QKeySequence("Ctrl+Shift+S"))
         schedules.triggered.connect(self._open_schedules)
         file_menu.addAction(schedules)
+
+        export_chat = QAction(t("export_chat"), self)
+        export_chat.setShortcut(QKeySequence("Ctrl+E"))
+        export_chat.triggered.connect(self._export_chat)
+        file_menu.addAction(export_chat)
 
         file_menu.addSeparator()
 
@@ -340,13 +350,17 @@ class HelloCodeGUI(QMainWindow):
         right_splitter.addWidget(self.tool_panel)
         self.schedule_log_panel = ScheduleLogPanel(self.storage, self._theme)
         right_splitter.addWidget(self.schedule_log_panel)
+        self.terminal_panel = TerminalPanel(self.workdir, self._theme)
+        right_splitter.addWidget(self.terminal_panel)
+        self.performance_panel = PerformancePanel(self.storage, self._theme)
+        right_splitter.addWidget(self.performance_panel)
         self.knowledge_panel = KnowledgePanel(self.storage, self.config.data_dir, self._theme)
         right_splitter.addWidget(self.knowledge_panel)
         self.file_browser = FileBrowser(self._theme)
         self.file_browser.file_selected.connect(self._on_file_selected)
         self.file_browser.workdir_changed.connect(self._on_workdir_changed)
         right_splitter.addWidget(self.file_browser)
-        right_splitter.setSizes([120, 120, 120, 180])
+        right_splitter.setSizes([100, 100, 120, 100, 100, 140])
         right_layout.addWidget(right_splitter)
         self.main_splitter.addWidget(right_panel)
 
@@ -670,6 +684,8 @@ class HelloCodeGUI(QMainWindow):
         if result and not streamed:
             tab.chat_panel.add_assistant_message(result)
         tab.chat_panel.set_input_enabled(True)
+        estimated_tokens = len(result) // 4 if result else 0
+        self.performance_panel.record_request(estimated_tokens, 0)
         tab.worker = None
         self.status_label.setText(t("ready"))
         self.task_panel.load_tasks(tab.session_id)
@@ -781,6 +797,7 @@ class HelloCodeGUI(QMainWindow):
             tab.chat_panel.clear()
             tab.tool_panel.clear()
             self.file_browser.set_root(self.workdir)
+            self.terminal_panel.set_workdir(self.workdir)
             self.session_panel.load_sessions(self.project["id"])
             self.session_panel.set_current_session(self.session_id)
             self.task_panel.load_tasks(self.session_id)
@@ -800,6 +817,11 @@ class HelloCodeGUI(QMainWindow):
     def _refresh_schedule_logs(self):
         if hasattr(self, 'schedule_log_panel'):
             self.schedule_log_panel.refresh()
+
+    def _export_chat(self):
+        tab = self._get_active_tab()
+        if tab:
+            export_chat_to_markdown(tab.chat_panel, tab.session_id, self)
 
     def _on_config_changed(self):
         self.provider = LLMProvider(self.config)
@@ -885,6 +907,10 @@ class HelloCodeGUI(QMainWindow):
             self.knowledge_panel.load_sources()
         if hasattr(self, 'schedule_log_panel'):
             self.schedule_log_panel.update_theme(self._theme)
+        if hasattr(self, 'terminal_panel'):
+            self.terminal_panel.update_theme(self._theme)
+        if hasattr(self, 'performance_panel'):
+            self.performance_panel.update_theme(self._theme)
 
     def _switch_language(self, lang: str):
         set_language(lang)
@@ -907,6 +933,10 @@ class HelloCodeGUI(QMainWindow):
             self.knowledge_panel.load_sources()
         if hasattr(self, 'schedule_log_panel'):
             self.schedule_log_panel.update_language()
+        if hasattr(self, 'terminal_panel'):
+            self.terminal_panel.update_language()
+        if hasattr(self, 'performance_panel'):
+            self.performance_panel.update_language()
 
     @Slot(str)
     def _on_file_selected(self, file_path: str):
@@ -937,6 +967,7 @@ class HelloCodeGUI(QMainWindow):
             tab.chat_panel.workdir = self.workdir
             tab.chat_panel.clear()
             tab.tool_panel.clear()
+        self.terminal_panel.set_workdir(self.workdir)
         self.session_panel.load_sessions(self.project["id"])
         self.session_panel.set_current_session(self.session_id)
         self.task_panel.load_tasks(self.session_id)
@@ -981,6 +1012,8 @@ class HelloCodeGUI(QMainWindow):
             self._worker.stop()
             self._worker.wait(3000)
             self._worker = None
+        if hasattr(self, 'terminal_panel'):
+            self.terminal_panel.cleanup()
         if self._scheduler:
             self._scheduler._running = False
         try:

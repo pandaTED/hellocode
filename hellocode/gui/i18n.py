@@ -200,6 +200,43 @@ _ZH = {
     "error_info": "错误信息",
     "close": "关闭",
 
+    # Terminal
+    "terminal": "终端",
+    "terminal_placeholder": "输入命令... (Enter 执行)",
+    "workdir": "工作目录",
+    "dir_not_found": "目录不存在",
+    "timeout": "超时",
+    "timeout_message": "命令执行超时 (30s)",
+    "exit_code": "退出码",
+    "changed_to": "已切换到",
+    "export": "导出",
+    "export_chat": "导出对话",
+    "export_success": "导出成功",
+    "export_failed": "导出失败",
+    "no_messages_to_export": "没有可导出的消息",
+
+    # Bookmarks
+    "bookmarks": "书签",
+    "add_bookmark": "添加书签",
+    "remove_bookmark": "移除书签",
+    "bookmark_note": "备注",
+    "no_bookmarks": "暂无书签",
+
+    # Performance
+    "performance": "性能统计",
+    "total_tokens": "总 Token 数",
+    "tokens_subtitle": "累计消耗",
+    "total_requests": "总请求数",
+    "requests_subtitle": "累计请求",
+    "avg_response_time": "平均响应时间",
+    "time_subtitle": "最近平均",
+    "total_cost": "总费用",
+    "cost_subtitle": "累计成本",
+    "today_usage": "今日用量",
+    "today_subtitle": "今日 Token",
+    "today": "今日",
+    "requests": "次请求",
+
     # Tabs
     "confirm": "确认",
     "tab_running_confirm": "此标签页正在运行任务，确定要关闭吗？",
@@ -407,6 +444,43 @@ _EN = {
     "no_schedule_result": "No result",
     "error_info": "Error",
     "close": "Close",
+
+    # Terminal
+    "terminal": "Terminal",
+    "terminal_placeholder": "Type command... (Enter to execute)",
+    "workdir": "Working Directory",
+    "dir_not_found": "Directory not found",
+    "timeout": "Timeout",
+    "timeout_message": "Command timed out (30s)",
+    "exit_code": "Exit code",
+    "changed_to": "Changed to",
+    "export": "Export",
+    "export_chat": "Export Chat",
+    "export_success": "Export successful",
+    "export_failed": "Export failed",
+    "no_messages_to_export": "No messages to export",
+
+    # Bookmarks
+    "bookmarks": "Bookmarks",
+    "add_bookmark": "Add Bookmark",
+    "remove_bookmark": "Remove Bookmark",
+    "bookmark_note": "Note",
+    "no_bookmarks": "No bookmarks",
+
+    # Performance
+    "performance": "Performance",
+    "total_tokens": "Total Tokens",
+    "tokens_subtitle": "All time",
+    "total_requests": "Total Requests",
+    "requests_subtitle": "All time",
+    "avg_response_time": "Avg Response Time",
+    "time_subtitle": "Recent average",
+    "total_cost": "Total Cost",
+    "cost_subtitle": "All time",
+    "today_usage": "Today's Usage",
+    "today_subtitle": "Today's tokens",
+    "today": "Today",
+    "requests": "requests",
 
     # Tabs
     "confirm": "Confirm",

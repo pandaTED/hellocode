@@ -243,6 +243,11 @@ CREATE TABLE IF NOT EXISTS schedule_run (
   FOREIGN KEY (schedule_id) REFERENCES schedule(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_message_session ON message(session_id, time_created);
 CREATE INDEX IF NOT EXISTS idx_part_message ON part(message_id);
 CREATE INDEX IF NOT EXISTS idx_schedule_next_run ON schedule(enabled, next_run_at);
@@ -1300,4 +1305,47 @@ class Storage:
     def delete_account(self, account_id: str) -> None:
         with self._lock:
             self.conn.execute("DELETE FROM account WHERE id=?", (account_id,))
+            self.conn.commit()
+
+    # ── Performance Stats ──
+
+    def get_performance_stats(self) -> dict:
+        try:
+            row = self._execute_one("SELECT value FROM settings WHERE key='performance_stats'")
+            if row and row.get("value"):
+                import json
+                return json.loads(row["value"])
+        except Exception:
+            pass
+        return {
+            "total_tokens": 0,
+            "total_requests": 0,
+            "avg_response_time": 0,
+            "total_cost": 0,
+            "today_tokens": 0,
+            "today_requests": 0,
+        }
+
+    def update_performance_stats(self, stats: dict) -> None:
+        import json
+        value = json.dumps(stats, ensure_ascii=False)
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('performance_stats', ?)",
+                (value,),
+            )
+            self.conn.commit()
+
+    # ── Settings ──
+
+    def get_setting(self, key: str) -> str | None:
+        row = self._execute_one("SELECT value FROM settings WHERE key=?", (key,))
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, value),
+            )
             self.conn.commit()

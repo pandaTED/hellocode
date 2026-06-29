@@ -779,3 +779,14 @@ class ChatPanel(QWidget):
         self.send_button.setEnabled(enabled)
         if enabled:
             self.input_field.setFocus()
+
+    def get_messages(self) -> list[dict]:
+        messages = []
+        for i in range(self.messages_layout.count()):
+            item = self.messages_layout.itemAt(i)
+            widget = item.widget() if item else None
+            if isinstance(widget, ChatMessage):
+                role = "user" if widget._is_user else "assistant"
+                content = widget._content if hasattr(widget, '_content') else ""
+                messages.append({"role": role, "content": content})
+        return messages
