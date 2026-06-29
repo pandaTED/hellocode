@@ -46,3 +46,14 @@ data/
 
 # Logs
 *.log
+
+# Lock files
+uv.lock
+
+# Crash reports
+nuitka-crash-report.xml
+
+# Personal documents (not project files)
+318*.md
+beijing_*.md
+北京*.md
