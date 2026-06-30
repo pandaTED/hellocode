@@ -350,17 +350,13 @@ class HelloCodeGUI(QMainWindow):
         right_splitter.addWidget(self.tool_panel)
         self.schedule_log_panel = ScheduleLogPanel(self.storage, self._theme)
         right_splitter.addWidget(self.schedule_log_panel)
-        self.terminal_panel = TerminalPanel(self.workdir, self._theme)
-        right_splitter.addWidget(self.terminal_panel)
-        self.performance_panel = PerformancePanel(self.storage, self._theme)
-        right_splitter.addWidget(self.performance_panel)
         self.knowledge_panel = KnowledgePanel(self.storage, self.config.data_dir, self._theme)
         right_splitter.addWidget(self.knowledge_panel)
         self.file_browser = FileBrowser(self._theme)
         self.file_browser.file_selected.connect(self._on_file_selected)
         self.file_browser.workdir_changed.connect(self._on_workdir_changed)
         right_splitter.addWidget(self.file_browser)
-        right_splitter.setSizes([100, 100, 120, 100, 100, 140])
+        right_splitter.setSizes([120, 120, 140, 180])
         right_layout.addWidget(right_splitter)
         self.main_splitter.addWidget(right_panel)
 
@@ -503,19 +499,37 @@ class HelloCodeGUI(QMainWindow):
         self._active_tab_id = tab_id
 
     def _new_tab(self):
-        session = self.storage.create_session(self.project["id"], str(self.workdir), t("new_session_title"))
-        tab_id = str(uuid.uuid4())[:8]
-        chat = ChatPanel(self._theme)
-        chat.message_sent.connect(self._on_message_sent)
-        tool = ToolPanel(self._theme)
-        task = TaskPanel(self.storage, self._theme)
-        tab = TabState(
-            tab_id=tab_id, session_id=session["id"], workdir=self.workdir,
-            chat_panel=chat, tool_panel=tool, task_panel=task,
+        from PySide6.QtWidgets import QInputDialog
+        tab_type, ok = QInputDialog.getItem(
+            self, t("new_tab"), t("select_tab_type"),
+            [t("chat_tab"), t("terminal_tab")], 0, False
         )
+        if not ok:
+            return
+
+        tab_id = str(uuid.uuid4())[:8]
+        if tab_type == t("terminal_tab"):
+            terminal = TerminalPanel(self.workdir, self._theme)
+            self._chat_stack.addWidget(terminal)
+            tab = TabState(
+                tab_id=tab_id, session_id="", workdir=self.workdir,
+                chat_panel=None, tool_panel=None, task_panel=None,
+            )
+            tab._terminal = terminal
+        else:
+            session = self.storage.create_session(self.project["id"], str(self.workdir), t("new_session_title"))
+            chat = ChatPanel(self._theme)
+            chat.message_sent.connect(self._on_message_sent)
+            tool = ToolPanel(self._theme)
+            task = TaskPanel(self.storage, self._theme)
+            tab = TabState(
+                tab_id=tab_id, session_id=session["id"], workdir=self.workdir,
+                chat_panel=chat, tool_panel=tool, task_panel=task,
+            )
+            self._chat_stack.addWidget(chat)
+
         self._tabs[tab_id] = tab
-        self._chat_stack.addWidget(chat)
-        idx = self._tab_bar.addTab(tab_id[:8])
+        idx = self._tab_bar.addTab(t("terminal") if tab_type == t("terminal_tab") else tab_id[:8])
         self._tab_bar.setTabData(idx, tab_id)
         self._switch_to_tab(tab_id)
 
@@ -524,17 +538,22 @@ class HelloCodeGUI(QMainWindow):
             return
         self._active_tab_id = tab_id
         tab = self._tabs[tab_id]
-        self._chat_stack.setCurrentWidget(tab.chat_panel)
+        if hasattr(tab, '_terminal') and tab._terminal:
+            self._chat_stack.setCurrentWidget(tab._terminal)
+        elif tab.chat_panel:
+            self._chat_stack.setCurrentWidget(tab.chat_panel)
         for i in range(self._tab_bar.count()):
             if self._tab_bar.tabData(i) == tab_id:
                 self._tab_bar.setCurrentIndex(i)
                 break
-        self.session_panel.load_sessions(self.project["id"])
-        self.session_panel.set_current_session(tab.session_id)
-        self.task_panel.load_tasks(tab.session_id)
+        if tab.session_id:
+            self.session_panel.load_sessions(self.project["id"])
+            self.session_panel.set_current_session(tab.session_id)
+            self.task_panel.load_tasks(tab.session_id)
+            self._load_chat_history(tab.session_id, tab.chat_panel)
         self.file_browser.set_root(tab.workdir)
-        self._load_chat_history(tab.session_id, tab.chat_panel)
-        self.model_label.setText(f"{t('model_label')}{self.config.get_provider_model(tab.agent_name)}")
+        if tab.agent_name:
+            self.model_label.setText(f"{t('model_label')}{self.config.get_provider_model(tab.agent_name)}")
 
     def _on_tab_close(self, index: int):
         tab_id = self._tab_bar.tabData(index)
@@ -682,10 +701,15 @@ class HelloCodeGUI(QMainWindow):
             tab.chat_panel.finish_stream()
         streamed = tab.chat_panel.consume_stream_finalized()
         if result and not streamed:
-            tab.chat_panel.add_assistant_message(result)
+            msg = tab.chat_panel.add_assistant_message(result)
+            if msg:
+                estimated_tokens = len(result) // 4 if result else 0
+                msg.add_performance_meta(estimated_tokens, 0)
+        elif tab.chat_panel._current_assistant:
+            content = tab.chat_panel._current_assistant._content if tab.chat_panel._current_assistant else result
+            estimated_tokens = len(content) // 4 if content else 0
+            tab.chat_panel._current_assistant.add_performance_meta(estimated_tokens, 0)
         tab.chat_panel.set_input_enabled(True)
-        estimated_tokens = len(result) // 4 if result else 0
-        self.performance_panel.record_request(estimated_tokens, 0)
         tab.worker = None
         self.status_label.setText(t("ready"))
         self.task_panel.load_tasks(tab.session_id)
@@ -907,10 +931,6 @@ class HelloCodeGUI(QMainWindow):
             self.knowledge_panel.load_sources()
         if hasattr(self, 'schedule_log_panel'):
             self.schedule_log_panel.update_theme(self._theme)
-        if hasattr(self, 'terminal_panel'):
-            self.terminal_panel.update_theme(self._theme)
-        if hasattr(self, 'performance_panel'):
-            self.performance_panel.update_theme(self._theme)
 
     def _switch_language(self, lang: str):
         set_language(lang)
@@ -933,10 +953,6 @@ class HelloCodeGUI(QMainWindow):
             self.knowledge_panel.load_sources()
         if hasattr(self, 'schedule_log_panel'):
             self.schedule_log_panel.update_language()
-        if hasattr(self, 'terminal_panel'):
-            self.terminal_panel.update_language()
-        if hasattr(self, 'performance_panel'):
-            self.performance_panel.update_language()
 
     @Slot(str)
     def _on_file_selected(self, file_path: str):

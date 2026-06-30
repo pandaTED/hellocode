@@ -326,6 +326,18 @@ class ChatMessage(QFrame):
         if hasattr(self, 'content_label'):
             self.content_label.setText(_render_markdown_html(self._content, self._theme))
 
+    def add_performance_meta(self, tokens: int, response_time_ms: float):
+        if hasattr(self, '_meta_label'):
+            return
+        th = self._theme
+        self._meta_label = QLabel(f"~{tokens} tokens · {response_time_ms:.0f}ms")
+        self._meta_label.setStyleSheet(f"""
+            color: {th.text_muted if th else '#6c7086'};
+            font-size: 10px;
+            padding: 2px 8px;
+        """)
+        self._bubble_layout.addWidget(self._meta_label)
+
 
 class ToolCallMessage(QFrame):
     """Displays a tool call and its result."""
@@ -657,6 +669,7 @@ class ChatPanel(QWidget):
         self._current_assistant = None
         self._stream_buffer = ""
         self._stream_finalized = False
+        return msg
 
     def start_assistant_stream(self):
         msg = ChatMessage("assistant", "", self._theme)
