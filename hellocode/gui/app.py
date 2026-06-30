@@ -951,7 +951,10 @@ class HelloCodeGUI(QMainWindow):
         self._setup_menu()
         self.model_label.setText(f"{t('model_label')}{self.config.get_provider_model()}")
         for tab in self._tabs.values():
-            tab.chat_panel.update_language()
+            if tab.chat_panel:
+                tab.chat_panel.update_language()
+            if hasattr(tab, '_terminal') and tab._terminal:
+                tab._terminal.update_language()
         if hasattr(self, 'tool_panel'):
             self.tool_panel.update_language()
         if hasattr(self, 'task_panel'):
