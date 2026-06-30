@@ -125,7 +125,13 @@ class LLMProvider:
                             if tc.function.arguments:
                                 current["function"]["arguments"] += tc.function.arguments
         finally:
-            await stream.close()
+            try:
+                if hasattr(stream, 'response'):
+                    await stream.response.aclose()
+                else:
+                    await stream.close()
+            except Exception:
+                pass
         for idx in sorted(tool_calls):
             yield {"type": "tool_call", "tool_call": tool_calls[idx]}
 

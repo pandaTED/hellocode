@@ -441,6 +441,8 @@ async def async_main(args: argparse.Namespace):
 
 def main():
     import logging
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*coroutine.*was never awaited.*")
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
