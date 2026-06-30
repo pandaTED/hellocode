@@ -228,9 +228,10 @@ class ChatMessage(QFrame):
         self._bubble = bubble
         bubble.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
-        layout = QVBoxLayout(bubble)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(5)
+        self._bubble_layout = QVBoxLayout(bubble)
+        self._bubble_layout.setContentsMargins(14, 10, 14, 10)
+        self._bubble_layout.setSpacing(5)
+        layout = self._bubble_layout
 
         # Message meta row
         meta_row = QHBoxLayout()
@@ -799,7 +800,7 @@ class ChatPanel(QWidget):
             item = self.messages_layout.itemAt(i)
             widget = item.widget() if item else None
             if isinstance(widget, ChatMessage):
-                role = "user" if widget._is_user else "assistant"
+                role = widget.role
                 content = widget._content if hasattr(widget, '_content') else ""
                 messages.append({"role": role, "content": content})
         return messages

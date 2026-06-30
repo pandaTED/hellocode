@@ -569,8 +569,12 @@ class HelloCodeGUI(QMainWindow):
                 return
             tab.worker.stop()
             tab.worker.wait(3000)
-        self._chat_stack.removeWidget(tab.chat_panel)
-        tab.chat_panel.deleteLater()
+        if hasattr(tab, '_terminal') and tab._terminal:
+            self._chat_stack.removeWidget(tab._terminal)
+            tab._terminal.deleteLater()
+        elif tab.chat_panel:
+            self._chat_stack.removeWidget(tab.chat_panel)
+            tab.chat_panel.deleteLater()
         del self._tabs[tab_id]
         self._tab_bar.removeTab(index)
         if self._active_tab_id == tab_id:
@@ -818,10 +822,13 @@ class HelloCodeGUI(QMainWindow):
         if tab:
             tab.workdir = workdir
             tab.session_id = session_id
-            tab.chat_panel.clear()
-            tab.tool_panel.clear()
+            if tab.chat_panel:
+                tab.chat_panel.clear()
+            if tab.tool_panel:
+                tab.tool_panel.clear()
             self.file_browser.set_root(self.workdir)
-            self.terminal_panel.set_workdir(self.workdir)
+            if hasattr(tab, '_terminal') and tab._terminal:
+                tab._terminal.set_workdir(self.workdir)
             self.session_panel.load_sessions(self.project["id"])
             self.session_panel.set_current_session(self.session_id)
             self.task_panel.load_tasks(self.session_id)
@@ -915,8 +922,13 @@ class HelloCodeGUI(QMainWindow):
             }}
         """)
         for tab in self._tabs.values():
-            tab.chat_panel.update_theme(self._theme)
-            tab.tool_panel.update_theme(self._theme)
+            if hasattr(tab, '_terminal') and tab._terminal:
+                tab._terminal.update_theme(self._theme)
+            else:
+                if tab.chat_panel:
+                    tab.chat_panel.update_theme(self._theme)
+                if tab.tool_panel:
+                    tab.tool_panel.update_theme(self._theme)
         if hasattr(self, 'tool_panel'):
             self.tool_panel.update_theme(self._theme)
         if hasattr(self, 'task_panel'):
@@ -980,10 +992,13 @@ class HelloCodeGUI(QMainWindow):
         if tab:
             tab.workdir = self.workdir
             tab.session_id = self.session_id
-            tab.chat_panel.workdir = self.workdir
-            tab.chat_panel.clear()
-            tab.tool_panel.clear()
-        self.terminal_panel.set_workdir(self.workdir)
+            if tab.chat_panel:
+                tab.chat_panel.workdir = self.workdir
+                tab.chat_panel.clear()
+            if tab.tool_panel:
+                tab.tool_panel.clear()
+            if hasattr(tab, '_terminal') and tab._terminal:
+                tab._terminal.set_workdir(self.workdir)
         self.session_panel.load_sessions(self.project["id"])
         self.session_panel.set_current_session(self.session_id)
         self.task_panel.load_tasks(self.session_id)
@@ -1024,12 +1039,12 @@ class HelloCodeGUI(QMainWindow):
                 tab.worker.stop()
                 tab.worker.wait(3000)
                 tab.worker = None
+            if hasattr(tab, '_terminal') and tab._terminal:
+                tab._terminal.cleanup()
         if self._worker:
             self._worker.stop()
             self._worker.wait(3000)
             self._worker = None
-        if hasattr(self, 'terminal_panel'):
-            self.terminal_panel.cleanup()
         if self._scheduler:
             self._scheduler._running = False
             import time
