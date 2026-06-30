@@ -223,6 +223,7 @@ class AgentLoop:
                     fn_args = {}
 
                 tool = self.tools.get(fn_name)
+                tool_result = ""
                 if not tool:
                     tool_result = json.dumps({"error": f"Unknown tool: {fn_name}"})
                     if on_tool_result:

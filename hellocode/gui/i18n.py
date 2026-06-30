@@ -152,7 +152,7 @@ _ZH = {
     "indexed": "已索引",
     "indexing": "索引中",
     "index_error": "索引错误",
-    "files": "文件",
+    "kb_files": "文件",
     "chunks": "片段",
     "total": "总计",
     "documents": "文档",
@@ -198,7 +198,6 @@ _ZH = {
     "execution_result": "执行结果",
     "no_schedule_result": "暂无执行结果",
     "error_info": "错误信息",
-    "close": "关闭",
 
     # Terminal
     "terminal": "终端",
@@ -398,7 +397,7 @@ _EN = {
     "indexed": "Indexed",
     "indexing": "Indexing",
     "index_error": "Index Error",
-    "files": "files",
+    "kb_files": "files",
     "chunks": "chunks",
     "total": "Total",
     "documents": "documents",
@@ -444,7 +443,6 @@ _EN = {
     "execution_result": "Result",
     "no_schedule_result": "No result",
     "error_info": "Error",
-    "close": "Close",
 
     # Terminal
     "terminal": "Terminal",

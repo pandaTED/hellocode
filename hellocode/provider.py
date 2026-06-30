@@ -131,11 +131,15 @@ class LLMProvider:
 
     async def _stream_with_retry(self, kwargs: dict) -> AsyncIterator[dict[str, Any]]:
         for attempt in range(self._max_retries):
+            data_yielded = False
             try:
                 async for chunk in self._stream(kwargs):
+                    data_yielded = True
                     yield chunk
                 return
             except _RETRYABLE_ERRORS as e:
+                if data_yielded:
+                    raise
                 if attempt < self._max_retries - 1:
                     delay = self._base_delay * (2 ** attempt)
                     logger.warning("Stream failed (%s), retrying in %.1fs (attempt %d/%d)", type(e).__name__, delay, attempt + 1, self._max_retries)
