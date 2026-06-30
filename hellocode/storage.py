@@ -541,15 +541,16 @@ class Storage:
     def delete_all_sessions(self, project_id: str) -> None:
         """Delete all sessions and child rows for a project in one transaction."""
         with self._lock:
-            self.conn.execute("DELETE FROM part WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
-            self.conn.execute("DELETE FROM message WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
-            self.conn.execute("DELETE FROM history_fts WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
-            self.conn.execute("DELETE FROM task_event WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
-            self.conn.execute("DELETE FROM task WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
-            self.conn.execute("DELETE FROM actor_registry WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
-            self.conn.execute("DELETE FROM inbox WHERE receiver_session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
-            self.conn.execute("DELETE FROM workflow_run WHERE session_id IN (SELECT id FROM session WHERE project_id=?)", (project_id,))
-            self.conn.execute("DELETE FROM session WHERE project_id=?", (project_id,))
+            sids_sub = "SELECT id FROM session WHERE project_id=?"
+            self.conn.execute(f"DELETE FROM part WHERE session_id IN ({sids_sub})", (project_id,))
+            self.conn.execute(f"DELETE FROM message WHERE session_id IN ({sids_sub})", (project_id,))
+            self.conn.execute(f"DELETE FROM history_fts WHERE session_id IN ({sids_sub})", (project_id,))
+            self.conn.execute(f"DELETE FROM task_event WHERE session_id IN ({sids_sub})", (project_id,))
+            self.conn.execute(f"DELETE FROM task WHERE session_id IN ({sids_sub})", (project_id,))
+            self.conn.execute(f"DELETE FROM actor_registry WHERE session_id IN ({sids_sub})", (project_id,))
+            self.conn.execute(f"DELETE FROM inbox WHERE receiver_session_id IN ({sids_sub}) OR sender_session_id IN ({sids_sub})", (project_id, project_id))
+            self.conn.execute(f"DELETE FROM workflow_run WHERE session_id IN ({sids_sub})", (project_id,))
+            self.conn.execute(f"DELETE FROM session WHERE project_id=?", (project_id,))
             self.conn.commit()
 
     # ── Message ──

@@ -107,13 +107,13 @@ class PerformancePanel(QWidget):
 
         header = QHBoxLayout()
         header.setContentsMargins(12, 8, 12, 4)
-        header_label = QLabel(t("performance"))
-        header_label.setStyleSheet(f"""
+        self.header_label = QLabel(t("performance"))
+        self.header_label.setStyleSheet(f"""
             color: {th.text_secondary if th else '#a6adc8'};
             font-size: 13px;
             font-weight: 600;
         """)
-        header.addWidget(header_label)
+        header.addWidget(self.header_label)
         header.addStretch()
 
         self.refresh_btn = QPushButton(t("refresh"))

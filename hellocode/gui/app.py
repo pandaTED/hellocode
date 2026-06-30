@@ -1016,6 +1016,8 @@ class HelloCodeGUI(QMainWindow):
             self.terminal_panel.cleanup()
         if self._scheduler:
             self._scheduler._running = False
+            import time
+            time.sleep(0.1)
         try:
             self.storage.close()
         except Exception:
