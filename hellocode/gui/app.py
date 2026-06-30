@@ -752,14 +752,15 @@ class HelloCodeGUI(QMainWindow):
 
     def _new_session(self):
         tab = self._get_active_tab()
-        if not tab:
+        if not tab or not tab.chat_panel:
             return
         session = self.storage.create_session(
             self.project["id"], str(self.workdir), t("new_session_title")
         )
         tab.session_id = session["id"]
         tab.chat_panel.clear()
-        tab.tool_panel.clear()
+        if tab.tool_panel:
+            tab.tool_panel.clear()
         self.session_panel.load_sessions(self.project["id"])
         self.session_panel.set_current_session(tab.session_id)
         self.task_panel.load_tasks(tab.session_id)
@@ -879,10 +880,11 @@ class HelloCodeGUI(QMainWindow):
         )
         self.session_id = session["id"]
         tab = self._get_active_tab()
-        if tab:
+        if tab and tab.chat_panel:
             tab.session_id = session["id"]
             tab.chat_panel.clear()
-            tab.tool_panel.clear()
+            if tab.tool_panel:
+                tab.tool_panel.clear()
             self.task_panel.load_tasks(self.session_id)
             self.session_panel.load_sessions(self.project["id"])
             self.session_panel.set_current_session(self.session_id)

@@ -116,9 +116,14 @@ class Scheduler:
         if schedule_id in self._running_ids:
             return
         self._running_ids.add(schedule_id)
-        run_id = self.storage.uid()
-        self.storage.create_schedule_run(run_id, schedule_id)
-        self.storage.update_schedule(schedule_id, last_run_at=self.storage.now())
+        try:
+            run_id = self.storage.uid()
+            self.storage.create_schedule_run(run_id, schedule_id)
+            self.storage.update_schedule(schedule_id, last_run_at=self.storage.now())
+        except Exception as e:
+            logger.error("Failed to create schedule run: %s", e)
+            self._running_ids.discard(schedule_id)
+            return
 
         try:
             task_type = schedule["task_type"]

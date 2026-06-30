@@ -180,7 +180,7 @@ class MessageInput(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         font = QFont()
-        font.setPointSize(13)
+        font.setPointSize(max(10, font.pointSize()))
         self.setFont(font)
         self.setAcceptRichText(False)
         self.setTabChangesFocus(True)
